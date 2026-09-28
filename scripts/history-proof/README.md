@@ -65,10 +65,11 @@ events, per-frame positions and screenshot names. `comparison.png` is a labeled
 contact sheet; original screenshots remain unaltered. A failed setup also saves
 `failure.png`, page state, and logs whenever the host is reachable.
 
-Exit 0 requires baseline **clearance** failure with a moving native scrollbar,
+Exit 0 requires baseline **native scrollbar overlap** with a moving visible thumb,
 candidate clearance >=8px on overflow, <=1px search movement, usable search,
 working scroll in both variants, and matching moving scrollbar pixels in the
-candidate. Exit 1 means the candidate violates the layout contract. Exit 2 means
+candidate. The detected candidate thumb must fit below the filter buttons and
+above the search box. Exit 1 means the candidate violates the layout contract. Exit 2 means
 the environment or reproduction evidence is inconclusive and must not be green.
 
 `Always` is explicitly a compatibility control: the OS already reserves scrollbar

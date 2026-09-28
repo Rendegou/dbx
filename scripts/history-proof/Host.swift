@@ -12,6 +12,7 @@ config.userContentController.addUserScript(WKUserScript(source: "localStorage.se
 let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 1100, height: 740), configuration: config)
 let window = NSWindow(contentRect: web.frame, styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
 window.title = "DBX History regression — native WKWebView"
+window.acceptsMouseMovedEvents = true
 window.contentView = web
 window.center()
 window.makeKeyAndOrderFront(nil)

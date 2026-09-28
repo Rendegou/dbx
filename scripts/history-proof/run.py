@@ -117,8 +117,9 @@ def screenshot(host, path):
 def thumb_evidence(path, measurement, info):
     """Conservative pixel gate, not an assertion that arbitrary grey pixels are a thumb.
 
-    Only inspect the empty strip strictly between filter labels and search input.
-    Retain all raw images; require a movable horizontal segment across scroll states.
+    Inspect the bottom of the filter row, INCLUDING pixels over its labels:
+    excluding that area would hide the exact overlay defect in the baseline.
+    Reject text/borders later using thumb length, direction and scroll travel.
     """
     from PIL import Image
     with Image.open(path) as source:
@@ -126,9 +127,9 @@ def thumb_evidence(path, measurement, info):
         scale = im.width / info['width']
         title = im.height - info['height'] * scale
         f, s = measurement['filter'], measurement['search']
-        y0 = int(title + (max(b['bottom'] for b in measurement['buttons'])+1) * scale)
+        y0 = int(title + max(f['y'], f['bottom']-16) * scale)
         y1 = int(title + (s['y']-1)*scale)
-        x0, x1 = int((f['x']+12)*scale), int((f['right']-12)*scale)
+        x0, x1 = int((f['x']+1)*scale), int((f['right']-1)*scale)
         segments = []
         for y in range(max(0,y0), min(im.height,y1)):
             start = None
@@ -171,8 +172,12 @@ def moving_thumb(shots):
                     if (abs(left['y']-right['y']) <= 1 and
                         abs(length-(right['end']-right['x'])) <= 5 and
                         abs((right['x']-left['x'])-expected) <= 6):
+                        rows = [s['y'] for s in first['thumbSegments'] if abs(s['x']-left['x']) <= 2 and abs(s['end']-left['end']) <= 2 and abs(s['y']-left['y']) <= 8]
                         return {'from':first['file'], 'to':second['file'],
-                                'expectedTravel':expected, 'observedTravel':right['x']-left['x']}
+                                'expectedTravel':expected, 'observedTravel':right['x']-left['x'],
+                                'thumbY':min(rows), 'thumbBottom':max(rows)+1,
+                                'labelsBottom':max((b['bottom'] for b in a.get('buttons',[])),default=0),
+                                'searchTop':a.get('search',{}).get('y',float('inf'))}
     return None
 
 
@@ -231,16 +236,19 @@ def exercise(host, directory, widths):
             motion = max(v['scrollLeft'] for v in frames)-min(v['scrollLeft'] for v in frames)
             jitter = max(v['searchTop'] for v in frames)-min(v['searchTop'] for v in frames)
             visual = moving_thumb(shots)
+            thumb_clear = bool(visual and visual['thumbY'] >= visual['labelsBottom'] and visual['thumbBottom'] < visual['searchTop'])
             entry = {'overflow':overflowing, 'scrollMotion':motion, 'searchJitter':jitter,
                      'nativeWheelReceived':any(e['trusted'] and abs(e['dx'])>0 for e in after['wheelEvents']),
                      'searchUsable':focused and all(s['layout']['inputHit'] for s in shots),
                      'lastFilterReached':any(s['layout']['lastVisible'] for s in shots),
                      'minGap':min(s['layout']['gap'] for s in shots),
-                     'movingThumbVisible':bool(visual), 'thumbMatch':visual, 'screenshots':shots}
+                     'movingThumbVisible':bool(visual), 'thumbClearOfControls':thumb_clear,
+                     'thumbMatch':visual, 'screenshots':shots}
             # 8px is the user-visible clearance contract, independent of the 44px implementation.
-            entry['layoutPass'] = entry['searchUsable'] and jitter <= 1 and (not overflowing or entry['minGap'] >= 8)
+            entry['layoutPass'] = entry['searchUsable'] and jitter <= 1 and (not overflowing or entry['minGap'] >= 8) and (not visual or thumb_clear)
             entry['inputPass'] = not overflowing or (motion > 10 and entry['nativeWheelReceived'] and entry['lastFilterReached'])
             case['cycles'].append(entry)
+            print(f"{directory.name} {label}: scroll={motion:.1f}px, gap={entry['minGap']:.1f}px, visible={bool(visual)}, clear={thumb_clear}",flush=True)
             (directory/'partial.json').write_text(json.dumps(result,indent=2))
             host.click(toolbar)
             wait_for(lambda: host.js("document.querySelector('[data-history-panel]') === null"))
@@ -260,9 +268,9 @@ def verdict(baseline, candidate, require_reproduction=True):
         return 2, 'INCONCLUSIVE: layout passed, but native scrollbar pixels were not proven visible'
     if not require_reproduction:
         return 0, 'CONTROL PASS: candidate layout and native scrollbar work; this mode does not establish baseline reproduction'
-    if not any(c['overflow'] and c['minGap'] < 8 and c['movingThumbVisible'] for c in old):
-        return 2, 'INCONCLUSIVE: baseline clearance failure with a visible moving scrollbar was not reproduced'
-    return 0, 'PASS: A/B clearance regression with native scroll and visible moving thumb (review raw images for original video equivalence)'
+    if not any(c['overflow'] and not c['thumbClearOfControls'] and c['movingThumbVisible'] for c in old):
+        return 2, 'INCONCLUSIVE: baseline native scrollbar overlap was not reproduced'
+    return 0, 'PASS: baseline native scrollbar overlaps controls; candidate reserves clear space with usable search and native scrolling'
 
 
 def make_gallery(output, results):

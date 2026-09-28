@@ -6,7 +6,7 @@ from run import moving_thumb, verdict
 
 def report(gap=16):
     return {'cases':[{'cycles':[dict(inputPass=True, layoutPass=gap >= 8,
-        overflow=True, minGap=gap, movingThumbVisible=True)]}]}
+        overflow=True, minGap=gap, movingThumbVisible=True, thumbClearOfControls=gap>=8)]}]}
 
 
 class EvidenceTests(unittest.TestCase):
