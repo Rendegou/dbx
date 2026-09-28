@@ -1,17 +1,87 @@
-name: History macOS layout check
+name: History macOS evidence
 
 on:
   push:
-    branches:
-      - preview/10328-history-mac
+    branches: [preview/10328-history-mac]
+    paths:
+      - scripts/history-proof/**
+      - .github/workflows/history-mac-preview.yml
+      - apps/desktop/**
+  workflow_dispatch:
+    inputs:
+      full_tauri:
+        description: Also build and smoke-test the complete Tauri app
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+concurrency:
+  group: history-evidence-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  history-layout:
-    runs-on: macos-latest
-    timeout-minutes: 120
+  native-layout:
+    runs-on: macos-15
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        scrollbars: [Always, WhenScrolling]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Prepare screenshot analysis
+        run: python3 -m venv .history-venv && .history-venv/bin/python -m pip install Pillow==11.3.0
+      - name: Set native scrollbar preference before launching WKWebView
+        env:
+          SCROLLBAR_MODE: ${{ matrix.scrollbars }}
+        run: defaults write -g AppleShowScrollBars -string "$SCROLLBAR_MODE"
+      - name: Baseline versus candidate with native input and system screenshots
+        run: .history-venv/bin/python scripts/history-proof/run.py --output history-proof-results
+      - name: Evidence summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = Path('history-proof-results/result.json')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              if p.exists():
+                  r = json.loads(p.read_text())
+                  f.write(r.get('verdict', 'INCONCLUSIVE') + '\n\n' + r['scope'] + '\n')
+                  f.write(f"\nElapsed: {r['durationSeconds']} seconds. Candidate: `{r['candidateSha']}`\n")
+              else:
+                  f.write('INCONCLUSIVE: native test did not produce results. Inspect setup/compile logs.\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: History-evidence-${{ matrix.scrollbars }}
+          path: |
+            history-proof-results/**/*.png
+            history-proof-results/**/*.json
+            history-proof-results/**/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  tauri-smoke:
+    if: github.event_name == 'workflow_dispatch' && inputs.full_tauri
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_DEV_INCREMENTAL: false
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -25,24 +95,23 @@ jobs:
         with:
           targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: history-debug-v1
+          cache-workspace-crates: true
+          cache-on-failure: true
       - run: pnpm install --frozen-lockfile
-      - name: Build test-instrumented Apple Silicon app
+      - name: Build debug app (no release LTO, no DMG)
         run: >-
-          pnpm tauri build --ci --target aarch64-apple-darwin --features history-e2e --bundles app
+          pnpm tauri build --ci --debug --target aarch64-apple-darwin --features history-e2e --bundles app
           --config '{"bundle":{"createUpdaterArtifacts":false,"macOS":{"signingIdentity":"-"}}}'
-      - name: Show macOS scrollbars permanently
-        run: |
-          defaults write -g AppleShowScrollBars -string Always
-          killall cfprefsd || true
-      - name: Exercise History in macOS WKWebView
+      - name: Packaged Tauri smoke test (not the native scrollbar evidence gate)
         run: >-
           python3 scripts/history_macos_e2e.py
-          --app target/aarch64-apple-darwin/release/bundle/macos/DBX.app
-          --output history-macos-results
+          --app target/aarch64-apple-darwin/debug/bundle/macos/DBX.app
+          --output history-tauri-smoke
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: DBX-history-macos-results
-          path: history-macos-results/
-          if-no-files-found: warn
-          retention-days: 7
+          name: History-tauri-smoke
+          path: history-tauri-smoke/
+          retention-days: 14
