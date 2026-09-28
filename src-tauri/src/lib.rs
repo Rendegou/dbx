@@ -1482,6 +1482,9 @@ pub fn run() {
         // through this scheme; see plugin_ui_protocol.rs.
         .register_asynchronous_uri_scheme_protocol(plugin_ui_protocol::PLUGIN_UI_SCHEME, plugin_ui_protocol::handle);
 
+    #[cfg(all(target_os = "macos", feature = "history-e2e"))]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+
     let builder = if should_enable_single_instance(cfg!(debug_assertions)) {
         builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             let app_open_requested = args.iter().any(|arg| commands::deep_link::is_app_open_deep_link(arg));

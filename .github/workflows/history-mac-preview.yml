@@ -1,4 +1,4 @@
-name: History macOS preview
+name: History macOS layout check
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  history-layout:
     runs-on: macos-latest
     timeout-minutes: 120
     steps:
@@ -24,14 +24,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
-      - name: Build Apple Silicon DMG
+      - name: Build test-instrumented Apple Silicon app
         run: >-
-          pnpm tauri build --ci --target aarch64-apple-darwin --bundles dmg
+          pnpm tauri build --ci --target aarch64-apple-darwin --features history-e2e --bundles app
           --config '{"bundle":{"createUpdaterArtifacts":false,"macOS":{"signingIdentity":"-"}}}'
+      - name: Exercise History in macOS WKWebView
+        run: >-
+          python3 scripts/history_macos_e2e.py
+          --app target/aarch64-apple-darwin/release/bundle/macos/DBX.app
+          --output history-macos-results
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: DBX-history-preview-mac-arm64
-          path: target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
-          if-no-files-found: error
+          name: DBX-history-macos-results
+          path: history-macos-results/
+          if-no-files-found: warn
           retention-days: 7

@@ -23,6 +23,7 @@ sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]
 sqlite-multiple-ciphers = ["dbx-core/sqlite-multiple-ciphers"]
 sqlite-bundled = ["dbx-core/sqlite-bundled"]
 system-fonts = ["dbx-core/system-fonts"]
+history-e2e = ["dep:tauri-plugin-wdio-webdriver"]
 
 [build-dependencies]
 tauri-build = { version = "2.5.6", features = [] }
@@ -79,6 +80,7 @@ font-kit = "0.14.3"
 tauri-plugin-clipboard-manager = "2.3.2"
 sys-locale = "0.3"
 sysinfo = { version = "0.32", features = ["system"] }
+tauri-plugin-wdio-webdriver = { version = "1", optional = true }
 
 [dev-dependencies]
 dbx-core = { path = "../crates/dbx-core", default-features = false, features = ["test-support"] }

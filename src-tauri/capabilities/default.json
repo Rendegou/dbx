@@ -51,6 +51,7 @@
     "process:default",
     "shell:allow-open",
     "updater:default",
-    "window-state:default"
+    "window-state:default",
+    "wdio-webdriver:default"
   ]
 }
