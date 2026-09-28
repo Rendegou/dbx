@@ -162,6 +162,12 @@ def moving_thumb(shots):
                 if not 0.65 * expected_length <= length <= 1.25 * expected_length:
                     continue
                 for right in second['thumbSegments']:
+                    # Reject static segments present in both images, including
+                    # two fixed borders separated by the expected travel.
+                    if any(abs(left['x']-s['x']) <= 2 and abs(left['end']-s['end']) <= 2 and abs(left['y']-s['y']) <= 1 for s in second['thumbSegments']):
+                        continue
+                    if any(abs(right['x']-s['x']) <= 2 and abs(right['end']-s['end']) <= 2 and abs(right['y']-s['y']) <= 1 for s in first['thumbSegments']):
+                        continue
                     if (abs(left['y']-right['y']) <= 1 and
                         abs(length-(right['end']-right['x'])) <= 5 and
                         abs((right['x']-left['x'])-expected) <= 6):
@@ -173,6 +179,7 @@ def moving_thumb(shots):
 def exercise(host, directory, widths):
     toolbar = 'button:has(svg.lucide-history)'
     wait_for(lambda: host.rect(toolbar), 120)
+    host.js("window.__inputTrace=[];['pointerdown','pointerup','click','wheel'].forEach(type=>document.addEventListener(type,e=>window.__inputTrace.push({type:e.type,x:e.clientX,y:e.clientY,trusted:e.isTrusted,target:e.target.tagName}),true));true")
     host.click(toolbar)
     wait_for(lambda: host.js(MEASURE))
     result = {'cases': [], 'nativeHost': host.command('info')}
@@ -284,13 +291,15 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT/'history-proof-results')
     parser.add_argument('--baseline', default=BASELINE)
     parser.add_argument('--widths', default='288,240,600')
+    parser.add_argument('--theme', choices=['dark','light'], default='dark')
     args = parser.parse_args()
     if sys.platform != 'darwin':
         parser.error('Run this native test on macOS; use the GitHub workflow from Windows.')
     output = args.output.resolve()
+    os.environ['HISTORY_THEME'] = args.theme
     output.mkdir(parents=True,exist_ok=True)
     results = {'scope':'Real app frontend in native WKWebView, mocked external APIs; not packaged Tauri',
-               'os':platform.platform(), 'startedAt':time.time(), 'baselineRef':args.baseline,
+               'os':platform.platform(), 'theme':args.theme, 'startedAt':time.time(), 'baselineRef':args.baseline,
                'candidateSha':subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()}
     binary = output/'history-host'
     subprocess.run(['swiftc',str(Path(__file__).with_name('Host.swift')),'-o',str(binary),'-framework','AppKit','-framework','WebKit'],check=True)
@@ -322,7 +331,8 @@ def main():
                     if host:
                         try:
                             screenshot(host, directory/'failure.png')
-                            state = host.js("({url:location.href,text:document.body.innerText,html:document.body.innerHTML.slice(0,5000)})")
+                            state = host.js("({url:location.href,text:document.body.innerText,events:window.__inputTrace,html:document.body.innerHTML.slice(0,5000)})")
+                            state['nativeHost'] = host.command('info')
                             (directory/'failure-state.json').write_text(json.dumps(state,indent=2))
                         except Exception as capture_error:
                             (directory/'failure-capture.log').write_text(repr(capture_error))

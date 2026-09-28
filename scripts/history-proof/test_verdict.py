@@ -28,11 +28,12 @@ class EvidenceTests(unittest.TestCase):
 
     def test_static_lines_are_not_a_moving_thumb(self):
         shot = {'file':'a.png','layout':{'scrollLeft':0,'clientWidth':280,'scrollWidth':400},
-                'thumbSegments':[{'x':10,'end':206,'y':150},{'x':80,'end':276,'y':150}]}
+                'thumbSegments':[{'x':10,'end':206,'y':150},{'x':38,'end':234,'y':150}]}
         other = copy.deepcopy(shot)
         other['file'] = 'b.png'
         other['layout']['scrollLeft'] = 40
         self.assertIsNone(moving_thumb([shot,other]))
+        shot['thumbSegments'] = shot['thumbSegments'][:1]
         other['thumbSegments'] = [{'x':38,'end':234,'y':150}]
         self.assertIsNotNone(moving_thumb([shot,other]))
         other['thumbSegments'][0]['y'] = 155
