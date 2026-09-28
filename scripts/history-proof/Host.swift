@@ -73,7 +73,7 @@ DispatchQueue.global().async {
                 event.location = point(command)
                 event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window.windowNumber))
                 event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(window.windowNumber))
-                if let native = NSEvent(cgEvent: event) { window.sendEvent(native) }
+                event.postToPid(ProcessInfo.processInfo.processIdentifier)
                 reply(true)
             case "info":
                 reply(["window": window.windowNumber, "pid": ProcessInfo.processInfo.processIdentifier,

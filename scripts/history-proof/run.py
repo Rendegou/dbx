@@ -219,7 +219,7 @@ def exercise(host, directory, widths):
             # Scroll right and then back; capture during native scrolling, not after fade-out.
             for direction, delta in [('right', -35), ('left', 35)]:
                 for tick in range(10):
-                    host.command('wheel', x=px, y=py, delta=delta)
+                    host.command('wheel', x=px, y=f['y']+16, delta=delta)
                     time.sleep(0.035)
                     if tick in (1, 5, 9):
                         capture(f'{direction}-{tick}')
