@@ -1,0 +1,37 @@
+name: History macOS preview
+
+on:
+  push:
+    branches:
+      - preview/10328-history-mac
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-apple-darwin
+      - run: pnpm install --frozen-lockfile
+      - name: Build Apple Silicon DMG
+        run: >-
+          pnpm tauri build --ci --target aarch64-apple-darwin --bundles dmg
+          --config '{"bundle":{"createUpdaterArtifacts":false,"macOS":{"signingIdentity":"-"}}}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DBX-history-preview-mac-arm64
+          path: target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 7
