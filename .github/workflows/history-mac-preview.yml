@@ -43,6 +43,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Prepare screenshot analysis
         run: python3 -m venv .history-venv && .history-venv/bin/python -m pip install Pillow==11.3.0
+      - name: Check evidence gate rejects misleading images and missing reproduction
+        run: .history-venv/bin/python scripts/history-proof/test_verdict.py
       - name: Set native scrollbar preference before launching WKWebView
         env:
           SCROLLBAR_MODE: ${{ matrix.scrollbars }}
