@@ -70,7 +70,8 @@ return {
   searchBottom: searchRect.bottom,
   locale: document.documentElement.lang,
   scrollable: filter.classList.contains('history-filter-scroll--scrollable'),
-  scrollbarWidth: getComputedStyle(filter).scrollbarWidth
+  scrollbarWidth: getComputedStyle(filter).scrollbarWidth,
+  filterLabels: Array.from(filter.querySelectorAll('button'), button => button.textContent.trim())
 };
 """
 
@@ -98,7 +99,12 @@ def main():
     with (args.output / "app.log").open("w") as app_log:
         app = subprocess.Popen([str(binary)], env=env, stdout=app_log, stderr=subprocess.STDOUT)
         session = None
-        results = {"app": str(args.app), "screenshotErrors": []}
+        scrollbar_preference = subprocess.run(
+            ["defaults", "read", "-g", "AppleShowScrollBars"],
+            capture_output=True, text=True, check=False,
+        ).stdout.strip()
+        results = {"app": str(args.app), "scrollbarPreference": scrollbar_preference,
+                   "screenshotErrors": []}
         try:
             wait_for(lambda: request("GET", "/status"), 50)
             created = request("POST", "/session", {"capabilities": {"alwaysMatch": {}}})

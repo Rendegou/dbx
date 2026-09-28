@@ -30,6 +30,10 @@ jobs:
         run: >-
           pnpm tauri build --ci --target aarch64-apple-darwin --features history-e2e --bundles app
           --config '{"bundle":{"createUpdaterArtifacts":false,"macOS":{"signingIdentity":"-"}}}'
+      - name: Show macOS scrollbars permanently
+        run: |
+          defaults write -g AppleShowScrollBars -string Always
+          killall cfprefsd || true
       - name: Exercise History in macOS WKWebView
         run: >-
           python3 scripts/history_macos_e2e.py
