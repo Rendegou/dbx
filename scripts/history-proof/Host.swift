@@ -37,9 +37,14 @@ func point(_ command: [String: Any]) -> CGPoint {
     return CGPoint(x: inScreen.x, y: screenHeight - inScreen.y)
 }
 
-func post(_ type: CGEventType, _ command: [String: Any]) {
-    let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point(command), mouseButton: .left)!
-    event.postToPid(ProcessInfo.processInfo.processIdentifier)
+func post(_ type: NSEvent.EventType, _ command: [String: Any]) {
+    let x = command["x"] as? Double ?? 0
+    let y = command["y"] as? Double ?? 0
+    let location = web.convert(NSPoint(x: x, y: web.bounds.height - y), to: nil)
+    let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+        context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)!
+    window.sendEvent(event)
 }
 
 DispatchQueue.global().async {
@@ -65,7 +70,9 @@ DispatchQueue.global().async {
                 post(.mouseMoved, command)
                 let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: 0, wheel2: Int32(command["delta"] as? Int ?? -28), wheel3: 0)!
                 event.location = point(command)
-                event.postToPid(ProcessInfo.processInfo.processIdentifier)
+                event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window.windowNumber))
+                event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(window.windowNumber))
+                if let native = NSEvent(cgEvent: event) { window.sendEvent(native) }
                 reply(true)
             case "info":
                 reply(["window": window.windowNumber, "pid": ProcessInfo.processInfo.processIdentifier,

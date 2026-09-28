@@ -318,6 +318,15 @@ def main():
                     host = Host(binary,directory)
                     host.command('load',url='http://127.0.0.1:5198')
                     results[variant] = exercise(host,directory,[int(w) for w in args.widths.split(',')])
+                except Exception:
+                    if host:
+                        try:
+                            screenshot(host, directory/'failure.png')
+                            state = host.js("({url:location.href,text:document.body.innerText,html:document.body.innerHTML.slice(0,5000)})")
+                            (directory/'failure-state.json').write_text(json.dumps(state,indent=2))
+                        except Exception as capture_error:
+                            (directory/'failure-capture.log').write_text(repr(capture_error))
+                    raise
                 finally:
                     if host:
                         host.close()
