@@ -28,16 +28,6 @@ func reply(_ value: Any) {
     }
 }
 
-func point(_ command: [String: Any]) -> CGPoint {
-    // DOM uses top-left coordinates; AppKit view/window coordinates use bottom-left.
-    let x = command["x"] as? Double ?? 0
-    let y = command["y"] as? Double ?? 0
-    let inWindow = web.convert(NSPoint(x: x, y: web.isFlipped ? y : web.bounds.height - y), to: nil)
-    let inScreen = window.convertPoint(toScreen: inWindow)
-    let screenHeight = NSScreen.screens.first!.frame.height
-    return CGPoint(x: inScreen.x, y: screenHeight - inScreen.y)
-}
-
 func post(_ type: NSEvent.EventType, _ command: [String: Any]) {
     let x = command["x"] as? Double ?? 0
     let y = command["y"] as? Double ?? 0
@@ -70,10 +60,14 @@ DispatchQueue.global().async {
             case "wheel":
                 post(.mouseMoved, command)
                 let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: 0, wheel2: Int32(command["delta"] as? Int ?? -28), wheel3: 0)!
-                event.location = point(command)
-                event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window.windowNumber))
-                event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(window.windowNumber))
-                event.postToPid(ProcessInfo.processInfo.processIdentifier)
+                let x = command["x"] as? Double ?? 0
+                let y = command["y"] as? Double ?? 0
+                let inWindow = web.convert(NSPoint(x: x, y: web.isFlipped ? y : web.bounds.height - y), to: nil)
+                // Match WebKit's EventSenderProxy::mouseScrollBy: an NSEvent
+                // without an associated window needs flipped WINDOW coordinates
+                // relative to the first screen, not an absolute screen position.
+                event.location = CGPoint(x: inWindow.x, y: NSScreen.screens.first!.frame.height - inWindow.y)
+                if let native = NSEvent(cgEvent: event) { web.scrollWheel(with: native) }
                 reply(true)
             case "info":
                 reply(["window": window.windowNumber, "pid": ProcessInfo.processInfo.processIdentifier,

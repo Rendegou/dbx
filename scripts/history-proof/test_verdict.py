@@ -22,6 +22,12 @@ class EvidenceTests(unittest.TestCase):
         new = report()
         new['cases'][0]['cycles'][0]['inputPass'] = False
         self.assertEqual(verdict(report(6),new)[0],2)
+
+    def test_control_pass_is_explicit_and_never_reproduction(self):
+        code, message = verdict(report(),report(),require_reproduction=False)
+        self.assertEqual(code,0)
+        self.assertTrue(message.startswith('CONTROL PASS'))
+        self.assertEqual(verdict(report(),report())[0],2)
         new = report()
         new['cases'][0]['cycles'][0]['movingThumbVisible'] = False
         self.assertEqual(verdict(report(6),new)[0],2)

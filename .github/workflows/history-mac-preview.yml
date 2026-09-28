@@ -48,7 +48,7 @@ jobs:
           SCROLLBAR_MODE: ${{ matrix.scrollbars }}
         run: defaults write -g AppleShowScrollBars -string "$SCROLLBAR_MODE"
       - name: Baseline versus candidate with native input and system screenshots
-        run: .history-venv/bin/python scripts/history-proof/run.py --output history-proof-results
+        run: .history-venv/bin/python scripts/history-proof/run.py --output history-proof-results ${{ matrix.scrollbars == 'Always' && '--control-only' || '' }}
       - name: Evidence summary
         if: always()
         run: |

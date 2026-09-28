@@ -25,10 +25,10 @@ pnpm install --frozen-lockfile
 python3 -m venv .history-venv
 .history-venv/bin/python -m pip install Pillow==11.3.0
 defaults write -g AppleShowScrollBars -string Always
-.history-venv/bin/python scripts/history-proof/run.py --output history-proof-results
+.history-venv/bin/python scripts/history-proof/run.py --control-only --output history-proof-results
 ```
 
-Run again with `WhenScrolling` and a different output directory. The workflow
+Run again with `WhenScrolling`, **without `--control-only`**, and a different output directory. The workflow
 runs both settings in separate macOS jobs. On a personal Mac, record and restore
 your previous `AppleShowScrollBars` preference afterwards. The test needs a GUI
 session and permission to take window screenshots.
@@ -46,6 +46,8 @@ artifacts. Do not treat a skipped full Tauri job as a passed integration test.
 - Three close/open cycles per width, actual application resize handle.
 - Native AppKit/Quartz input; trusted horizontal wheel events and scrollLeft
   movement must be observed. The last filter must become reachable.
+  Wheel coordinate conversion follows WebKit's own
+  [EventSenderProxy](https://github.com/WebKit/WebKit/blob/main/Tools/WebKitTestRunner/mac/EventSenderProxy.mm).
 - System window screenshots during left/right scrolling, including native
   scrollbar rendering. No CSS scrollbar substitution or JavaScript scrollLeft
   manipulation is used.
@@ -68,6 +70,12 @@ candidate clearance >=8px on overflow, <=1px search movement, usable search,
 working scroll in both variants, and matching moving scrollbar pixels in the
 candidate. Exit 1 means the candidate violates the layout contract. Exit 2 means
 the environment or reproduction evidence is inconclusive and must not be green.
+
+`Always` is explicitly a compatibility control: the OS already reserves scrollbar
+space in the baseline. `--control-only` still requires candidate layout and native
+scrollbar evidence, but reports `CONTROL PASS` without claiming reproduction.
+The companion `WhenScrolling` job must pass the baseline-failure gate. Both jobs
+must pass; a control pass alone never proves the repair.
 
 The 8px clearance rule is a protective layout contract, **not a measurement of
 the original video's occlusion**. Review the old/new raw images against the

@@ -249,17 +249,19 @@ def exercise(host, directory, widths):
     return result
 
 
-def verdict(baseline, candidate):
+def verdict(baseline, candidate, require_reproduction=True):
     old = [c for case in baseline['cases'] for c in case['cycles']]
     new = [c for case in candidate['cases'] for c in case['cycles']]
     if not new or not all(c['inputPass'] for c in old+new):
         return 2, 'INCONCLUSIVE: native input did not reproduce horizontal scrolling'
     if not all(c['layoutPass'] for c in new):
         return 1, 'FAIL: candidate violates search clearance/stability/usability'
-    if not any(c['overflow'] and c['minGap'] < 8 and c['movingThumbVisible'] for c in old):
-        return 2, 'INCONCLUSIVE: baseline clearance failure with a visible moving scrollbar was not reproduced'
     if not all(c['movingThumbVisible'] for c in new if c['overflow']):
         return 2, 'INCONCLUSIVE: layout passed, but native scrollbar pixels were not proven visible'
+    if not require_reproduction:
+        return 0, 'CONTROL PASS: candidate layout and native scrollbar work; this mode does not establish baseline reproduction'
+    if not any(c['overflow'] and c['minGap'] < 8 and c['movingThumbVisible'] for c in old):
+        return 2, 'INCONCLUSIVE: baseline clearance failure with a visible moving scrollbar was not reproduced'
     return 0, 'PASS: A/B clearance regression with native scroll and visible moving thumb (review raw images for original video equivalence)'
 
 
@@ -292,6 +294,7 @@ def main():
     parser.add_argument('--baseline', default=BASELINE)
     parser.add_argument('--widths', default='288,240,600')
     parser.add_argument('--theme', choices=['dark','light'], default='dark')
+    parser.add_argument('--control-only', action='store_true', help='Compatibility control; never claims baseline reproduction')
     args = parser.parse_args()
     if sys.platform != 'darwin':
         parser.error('Run this native test on macOS; use the GitHub workflow from Windows.')
@@ -299,7 +302,9 @@ def main():
     os.environ['HISTORY_THEME'] = args.theme
     output.mkdir(parents=True,exist_ok=True)
     results = {'scope':'Real app frontend in native WKWebView, mocked external APIs; not packaged Tauri',
-               'os':platform.platform(), 'theme':args.theme, 'startedAt':time.time(), 'baselineRef':args.baseline,
+               'os':platform.platform(), 'theme':args.theme, 'controlOnly':args.control_only,
+               'scrollbarPreference':subprocess.check_output(['defaults','read','-g','AppleShowScrollBars'],text=True).strip(),
+               'startedAt':time.time(), 'baselineRef':args.baseline,
                'candidateSha':subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()}
     binary = output/'history-host'
     subprocess.run(['swiftc',str(Path(__file__).with_name('Host.swift')),'-o',str(binary),'-framework','AppKit','-framework','WebKit'],check=True)
@@ -341,7 +346,7 @@ def main():
                     if host:
                         host.close()
                     stop(server)
-        code, results['verdict'] = verdict(results['baseline'],results['candidate'])
+        code, results['verdict'] = verdict(results['baseline'],results['candidate'],not args.control_only)
         make_gallery(output,results)
     except Exception as error:
         results['verdict'] = f'INCONCLUSIVE: harness/environment failure: {error!r}'
