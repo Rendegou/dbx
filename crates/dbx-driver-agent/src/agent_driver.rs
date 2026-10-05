@@ -1690,6 +1690,10 @@ fn is_retryable_agent_startup_error(error: &str) -> bool {
         && !error.contains(AGENT_JAVA_TOO_OLD_MESSAGE)
 }
 
+/// Outcome of one blocking agent RPC read: the restored stdout reader, the
+/// deserialized result (or error) and the JSON-RPC id the reply carried.
+type AgentResponseOutcome<T> = (BufReader<ChildStdout>, Result<T, String>, Option<u64>);
+
 impl AgentDriverClient {
     /// Spawn an agent process and wait for it to signal readiness.
     ///
@@ -1993,7 +1997,7 @@ impl AgentDriverClient {
         &mut self,
         method: &str,
         query_id: u64,
-        response_task: &mut tokio::task::JoinHandle<(BufReader<ChildStdout>, Result<T, String>, Option<u64>)>,
+        response_task: &mut tokio::task::JoinHandle<AgentResponseOutcome<T>>,
     ) {
         if self.dedicated_transaction_query_cancel
             && method == AgentMethod::ExecuteQuery.as_str()

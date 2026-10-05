@@ -4002,12 +4002,14 @@ pub struct ManualTransactionStatus {
 }
 impl ManualTransactionStatus {
     pub fn is_active(self) -> bool {
-        self.count == 1 && self.xact_state.map_or(true, |state| state == 1)
+        self.count == 1 && self.xact_state.is_none_or(|state| state == 1)
     }
 }
-fn uses_legacy_transaction_status(version: tiberius::FeatureLevel, server_major: Option<u32>) -> bool {
+/// SQL Server 2000 (product major 8) never offers XACT_STATE() and this driver
+/// negotiates TDS 7.1 with it, so the product major identifies the legacy
+/// count-only status check without reaching into a patched-only tiberius API.
+fn uses_legacy_transaction_status(server_major: Option<u32>) -> bool {
     server_major == Some(8)
-        && matches!(version, tiberius::FeatureLevel::SqlServer2000 | tiberius::FeatureLevel::SqlServer2000Sp1)
 }
 
 /// Consume the full response, including transaction descriptor ENVCHANGE tokens.
@@ -4030,7 +4032,7 @@ pub async fn manual_transaction_status(client: &mut SqlServerClient) -> Result<M
             return Err("SQL Server did not return its product version for transaction capability detection".to_owned());
         }
     }
-    let legacy = uses_legacy_transaction_status(client.tds_version(), client.server_major_version);
+    let legacy = uses_legacy_transaction_status(client.server_major_version);
     let results = execute_simple_batch_with_max_rows_metadata(
         client,
         if legacy {
@@ -4174,14 +4176,9 @@ mod tests {
     #[test]
     fn manual_transaction_status_keeps_legacy_and_modern_safety_explicit() {
         use super::{uses_legacy_transaction_status as legacy, ManualTransactionStatus as Status};
-        use tiberius::FeatureLevel::*;
-        assert!(legacy(SqlServer2000, Some(8)));
-        assert!(legacy(SqlServer2000Sp1, Some(8)));
-        for major in [None, Some(9), Some(16)] {
-            assert!(!legacy(SqlServer2000Sp1, major));
-        }
-        for version in [SqlServerV7, SqlServer2005, SqlServer2008, SqlServerN] {
-            assert!(!legacy(version, Some(8)));
+        assert!(legacy(Some(8)));
+        for major in [None, Some(9), Some(13), Some(16)] {
+            assert!(!legacy(major));
         }
         assert!(Status { count: 1, xact_state: None }.is_active());
         assert!(Status { count: 1, xact_state: Some(1) }.is_active());

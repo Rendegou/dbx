@@ -12,7 +12,7 @@
 
 - SQL Server 2019 Developer 15.0.4490.9、2022 Developer 16.0.4295.3：原生 Tiberius、Microsoft JDBC 13.2、jTDS 1.3.1 的手动事务均有实库验收。
 - SQL Server 2000：已在 MSDE SP4 Desktop Engine 8.00.2039 实例上验证原生 Tiberius 与 legacy Agent 的 jTDS 1.3.1 两条路径。显式选择 jTDS 与 legacy Agent 内 Microsoft JDBC 尝试后回退到 jTDS 均有覆盖；回退后实际驱动仍是 jTDS，不能标为 Microsoft JDBC 通过。
-- 原生路径对 SQL Server 2000 的支持方式：2026-10-04 在上述真实 8.00.2039 实例上只读执行 SELECT XACT_STATE()，服务器返回 SQLState 42000 / vendorCode 195（不识别函数），探测前后 @@TRANCOUNT=0。该证据促成旧版状态检查分支而非排除支持：客户端用 SERVERPROPERTY('ProductVersion') 取得主版本，8.x 且 TDS 功能级别为 SqlServer2000/2000Sp1 时状态探测只读 @@TRANCOUNT。主版本探测失败直接报错，不猜测服务器能力；错误码 195 且明确指向 XACT_STATE 的服务器错误仍归类为 Unsupported；认证、权限、网络和超时保留原有错误分类，开启失败不会执行用户 SQL。8.x 实库另要求并已修复 tiberius 登录响应解码（invalid token type 0）、TDS 7.1 功能级别协商、旧版 RPC ntext/image 编码与 ATTENTION 取消信号。
+- 原生路径对 SQL Server 2000 的支持方式：2026-10-04 在上述真实 8.00.2039 实例上只读执行 SELECT XACT_STATE()，服务器返回 SQLState 42000 / vendorCode 195（不识别函数），探测前后 @@TRANCOUNT=0。该证据促成旧版状态检查分支而非排除支持：客户端用 SERVERPROPERTY('ProductVersion') 取得主版本，8.x（该服务器经本驱动协商出的 TDS 功能级别即为 SqlServer2000/2000Sp1）时状态探测只读 @@TRANCOUNT。主版本探测失败直接报错，不猜测服务器能力；错误码 195 且明确指向 XACT_STATE 的服务器错误仍归类为 Unsupported；认证、权限、网络和超时保留原有错误分类，开启失败不会执行用户 SQL。8.x 实库另要求并已修复 tiberius 登录响应解码（invalid token type 0）、TDS 7.1 功能级别协商、旧版 RPC ntext/image 编码与 ATTENTION 取消信号。
 - 原生 TDS 不会因为手动事务开启失败自动切换为 JDBC；需要 JDBC 兼容路径时用户须显式选择 legacy 兼容驱动。其他未实测服务器版本不列为已验证；运行时仍按实际驱动与开启/状态探测结果判断，没有单一服务器版本白名单。
 - 用户反馈本次客户端手工测试未发现问题；未记录的具体版本/实际驱动组合不据此增加到实库矩阵。
 
