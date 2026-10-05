@@ -11,8 +11,8 @@ pub fn sql_server_2000() -> bool {
 }
 
 pub enum SqlServerClient {
-    Native(native::SqlServerClient),
-    Agent(AgentDriverClient),
+    Native(Box<native::SqlServerClient>),
+    Agent(Box<AgentDriverClient>),
 }
 
 pub async fn connect_with_port_explicit(
@@ -27,7 +27,7 @@ pub async fn connect_with_port_explicit(
     if !sql_server_2000() {
         return native::connect_with_port_explicit(host, port, port_explicit, user, password, database, timeout)
             .await
-            .map(SqlServerClient::Native);
+            .map(|client| SqlServerClient::Native(Box::new(client)));
     }
     let mut client = AgentDriverClient::spawn(AgentLaunchSpec::java_jar(
         std::env::var("DBX_TEST_SQLSERVER_JAVA").expect("Java 21 executable"),
@@ -43,7 +43,7 @@ pub async fn connect_with_port_explicit(
             "ssl":false,
         }))
         .await?;
-    Ok(SqlServerClient::Agent(client))
+    Ok(SqlServerClient::Agent(Box::new(client)))
 }
 
 pub async fn execute_simple_batch_with_max_rows(

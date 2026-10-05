@@ -482,6 +482,7 @@ pub async fn begin_manual_transaction(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_in_manual_transaction(
     state: State<'_, Arc<AppState>>,
     txn_session_id: String,
