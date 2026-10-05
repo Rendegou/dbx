@@ -404,6 +404,8 @@ export default withEnglishFallback({
     logoutConfirm: "¿Seguro que deseas cerrar sesión?",
   },
   toolbar: {
+    fileEncoding: "Codificación del archivo",
+    encodingAuto: "Automática",
     immediateSync: "Sincronizar ahora",
     commitOutcomeUnknown: "El resultado del commit es desconocido y la sesión ya no existe. Compruebe los datos antes de volver a ejecutar el SQL.",
     moreActions: "Más acciones",
@@ -8614,6 +8616,8 @@ export default withEnglishFallback({
     sidebarSearchOpenedDatabasesOnly: "Buscar solo en bases de datos abiertas",
     sidebarSearchOpenedDatabasesOnlyDescription: "La búsqueda de la barra lateral solo carga las bases de datos abiertas en la conexión actual (si no hay ninguna abierta, busca en todas). Al desactivarla, se buscará en todas las bases de datos de esa conexión.",
     shortcutSelectLineEnds: "Seleccionar finales de línea",
+    openQueryOnConnectionOpen: "Abrir la página de consulta al abrir la conexión",
+    openQueryOnConnectionOpenDescription: "Cuando está habilitado, al abrir una conexión o base de datos se accede de forma predeterminada a la página de consulta.",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",

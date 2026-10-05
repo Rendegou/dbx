@@ -399,6 +399,8 @@ export default withEnglishFallback({
     logoutConfirm: "ログアウトしてもよろしいですか？",
   },
   toolbar: {
+    fileEncoding: "ファイルの文字コード",
+    encodingAuto: "自動",
     immediateSync: "今すぐ同期",
     commitOutcomeUnknown: "コミット結果は不明で、セッションは既に存在しません。SQL を再実行する前にデータを確認してください。",
     moreActions: "その他の操作",
@@ -8401,6 +8403,8 @@ export default withEnglishFallback({
     sidebarSearchOpenedDatabasesOnly: "開いているデータベースのみを検索",
     sidebarSearchOpenedDatabasesOnlyDescription: "サイドバー検索は、現在の接続で開いているデータベースのみを読み込みます（1つも開いていない場合はすべてを検索します）。オフにすると、その接続のすべてのデータベースを検索します。",
     shortcutSelectLineEnds: "行末を選択",
+    openQueryOnConnectionOpen: "接続を開いたときにクエリページを開く",
+    openQueryOnConnectionOpenDescription: "有効にすると、接続またはデータベースを開いたときにデフォルトでクエリページが開きます。",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

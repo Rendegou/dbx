@@ -404,6 +404,8 @@ export default withEnglishFallback({
     logoutConfirm: "確定要登出嗎？",
   },
   toolbar: {
+    fileEncoding: "檔案編碼",
+    encodingAuto: "自動",
     commitOutcomeUnknown: "提交結果未知，交易工作階段已不存在。請核對資料後再決定是否重新執行 SQL。",
     moreActions: "更多操作",
     newConnection: "建立連線",
@@ -7716,6 +7718,8 @@ export default withEnglishFallback({
     sidebarSearchOpenedDatabasesOnly: "僅搜尋已開啟的資料庫",
     sidebarSearchOpenedDatabasesOnlyDescription: "側邊欄搜尋只載入目前連線中已開啟的資料庫（若一個都沒開啟則搜尋全部）。關閉後會搜尋該連線的全部資料庫。",
     shortcutSelectLineEnds: "選取行尾",
+    openQueryOnConnectionOpen: "開啟連線時進入查詢頁",
+    openQueryOnConnectionOpenDescription: "啟用後，開啟連線或資料庫時預設進入查詢頁面。",
   },
   driverStore: {
     jreDirRemoveFailed: "無法刪除舊的 JRE 目錄：{path}（原始錯誤：{error}）",
