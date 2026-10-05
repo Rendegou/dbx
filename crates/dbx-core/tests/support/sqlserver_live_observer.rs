@@ -107,12 +107,18 @@ pub async fn wait_for_session_release(client: &mut SqlServerClient, spid: i64, i
     let sql = if sql_server_2000() {
         let identity = identity.expect("actual SQL2000 login_time must be recorded").replace(char::from(39), "''");
         format!("SELECT COUNT(*) FROM master.dbo.sysprocesses WHERE spid={spid} AND login_time=CONVERT(datetime, '{identity}', 121)")
-    } else { active_query(spid) };
+    } else {
+        active_query(spid)
+    };
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let active = execute_query(client, &sql).await.unwrap();
-            if active.rows[0][0] == serde_json::json!(0) { break; }
+            if active.rows[0][0] == serde_json::json!(0) {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
-    }).await.expect("the original server task/transaction was not released");
+    })
+    .await
+    .expect("the original server task/transaction was not released");
 }

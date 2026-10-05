@@ -1,10 +1,10 @@
 # SQL Server 手动事务（#7542）
 
-实现基线：247eb2b0b（0.6.31），分支 codex/sqlserver-manual-transactions。
+实现基线：247eb2b0b（0.6.31），分支 codex/sqlserver-manual-transactions；2026-10-05 合并 upstream/main 38ce7b5dd（0.6.34）并重新做提交前验证。
 
 桌面查询标签页使用独立专用连接。事务句柄、生命周期 generation、实际驱动诊断和结束原因仅保留在内存；自动提交连接的临时表与 SET 状态不继承。所有执行按 GO 分 batch，完整消费响应；结果行数限制只影响保留的行。同一事务串行，执行时提交/回滚返回 Busy。结束原因保留 5 分钟，定期清理，最多保留 1024 条。
 
-原生路径采用普通 TDS batch 开启事务，检查 @@TRANCOUNT 与 XACT_STATE；SQL Server 2000（主版本 8.x 且 TDS 功能级别 7.1/7.0）缺少 XACT_STATE()，改用仅读取 @@TRANCOUNT 的旧版状态检查：无法区分可提交与不可提交事务，因此任何执行错误直接废弃所属会话，COMMIT/ROLLBACK 的确认响应仍是结束终局的唯一依据。SQL Server legacy 路由使用专用 Agent 进程。JDBC 采用 setAutoCommit(false)，在首次用户 batch 前确保一个物理事务，使用 JDBC commit/rollback；手动会话禁止自动重连。旧 legacy 组件缺少 manualTransactionBatch 能力时拒绝执行，需更新组件。没有服务器版本白名单。
+原生路径采用普通 TDS batch 开启事务，检查 @@TRANCOUNT 与 XACT_STATE；SQL Server 2000（主版本 8.x 且 TDS 功能级别 7.1）缺少 XACT_STATE()，改用仅读取 @@TRANCOUNT 的旧版状态检查：无法区分可提交与不可提交事务，因此任何执行错误直接废弃所属会话，COMMIT/ROLLBACK 的确认响应仍是结束终局的唯一依据。SQL Server legacy 路由使用专用 Agent 进程。JDBC 采用 setAutoCommit(false)，在首次用户 batch 前确保一个物理事务，使用 JDBC commit/rollback；手动会话禁止自动重连。旧 legacy 组件缺少 manualTransactionBatch 能力时拒绝执行，需更新组件。没有服务器版本白名单。
 
 执行失败尝试回滚；取消、超时、连接丢失和事务状态异常丢弃会话。只有明确回滚响应才能标记 rolled_back。提交确认立即记录 committed，连接清理不改变该结论。提交响应丢失记为 unknown，要求核对数据库，禁止重试提交和自动重跑 SQL。SQL Server 会话失效保留手动模式，仅下一次用户主动执行建立新事务。
 
@@ -129,8 +129,8 @@ SQL Server 现有 legacy 路由使用单进程 Agent，兼容层的断开 RPC �
 - Java common:test 与 sqlserver-legacy:test：通过；sqlserver-legacy:shadowJar 构建通过。JdbcExecutorTest 25 项、SqlServerLegacyAgentTest 最终 37 项。
 - 前端事务/能力/工具栏回归：5 个文件、108 passed。事务结果字段解析及文案回归：2 个文件、553 passed（两组包含重复的错误解析用例，不能相加作为独立测试总数）。
 - vue-tsc --noEmit 与前端 Vite 构建：通过。
-- 实库测试共 13 项：2019/2022 × 三个实际驱动的初次完整矩阵 72 次通过；最终 Agent 增量另补验现代 JDBC 四种组合的 44 次即时用例，通过。SQL2000 legacy 两条适用路径的完整 20 次及最终即时 18 次通过；SQL2000 原生 13 项全部通过（12 项即时矩阵 + 真实墙钟空闲）。最终原生协议增量后，2019/2022 原生各重跑 13 项全部通过。重复回归不合并成独立测试数量。正常 CI 默认 ignored，必须显式指向可写隔离测试库。
-- 最终代码复核没有未解决的 P1/P2；rustfmt 与 git diff --check 通过；前端 oxfmt/oxlint/vue-tsc 通过。pnpm check 的 connection-types 与 packages/app-tests 发布签名用例在本机失败，与本次改动无关：connection-types 因 node_modules/.bin/node.CMD 启动失败，macOS 签名流程测试在基线 247eb2b0b 纯净检出同样 35/39 失败（Windows 环境缺少 macOS 签名工具链 mock 前置条件）。
+- 2026-10-04 时实库测试共 13 项：2019/2022 × 三个实际驱动的初次完整矩阵 72 次通过；最终 Agent 增量另补验现代 JDBC 四种组合的 44 次即时用例，通过。SQL2000 legacy 两条适用路径的完整 20 次及最终即时 18 次通过；SQL2000 原生 13 项全部通过（12 项即时矩阵 + 真实墙钟空闲）。最终原生协议增量后，2019/2022 原生各重跑 13 项全部通过。重复回归不合并成独立测试数量。正常 CI 默认 ignored，必须显式指向可写隔离测试库。
+- 2026-10-04 的以上验证记录针对当时的代码；2026-10-05 提交前复核另外发现并修复请求丢弃与断开连接交叉的取消所有权问题，以及 JDBC 请求丢弃后过早结束取消走廊的问题。修复后检查结果单独记录。pnpm check 的 connection-types 与 packages/app-tests 发布签名用例在本机失败，与本次改动无关：connection-types 因 node_modules/.bin/node.CMD 启动失败，macOS 签名流程测试在基线 247eb2b0b 纯净检出同样 35/39 失败（Windows 环境缺少 macOS 签名工具链 mock 前置条件）。
 
 Windows 的默认 GNU Rust 工具链缺少本地 C/OpenSSL 编译依赖，本次使用 target 下的便携编译依赖完成检查与测试，没有修改仓库 Cargo 配置或全局工具链。
 
@@ -141,3 +141,27 @@ SQL Server 2000 的实际验证范围为 MSDE 2000 SP4 Desktop Engine 8.00.2039 
 范围不包括 Web 手动事务、嵌套事务、保存点或备份一致性快照。无法从事务计数检测到的存储过程自行提交并重新开启事务，不应被视为受 DBX 完全控制；可检测到的结束/计数异常会废弃会话。
 
 legacy 发布时必须同时发布此次构建的 SQL Server Agent 组件，并按组件仓库流程更新可下载安装的版本；仅更新桌面应用而保留旧 Agent 会得到明确的组件更新提示。manualTransactionBatch 是运行时握手能力标识，不根据安装版本号猜测安全性。本次没有发布可下载组件；合并发布时需按组件仓库流程同步交付。
+
+## 2026-10-05 提交前复核与上游合并
+
+合并 upstream/main 38ce7b5dd（0.6.34）。JsonRpcServer 保留新增 deferLobs 选项以及 SQL Server returnAllResults 路由；queryStore 保留 SQL Server executionId/timeout 参数，兼容上游 useLargeValuePreview。新增 18 个文案键已覆盖 en、zh-CN、zh-TW、es、it、ja、ko、pt-BR、ru。
+
+复核发现两个中断清理竞态并完成修复：disconnect 已移除 busy 会话时，后续执行 future 被丢弃，原 ExecutionGuard 无法取得清理所有权，disconnect 又只关闭 TCP，遗漏原生 ATTENTION；现在接管 busy 会话的 disconnect 同样负责有界中断。JDBC 执行 future 被丢弃时，直接追加 cancel_session 会因为原 reader 持有 stdout 而立即失败，随后过早关闭进程；现在每个 Agent batch 在持有客户端 Arc/锁的 owned task 内执行，外层 Drop 只取消 token，后台继续完成现有有界取消走廊。后台同时持有查询登记，直到取消结束才确认 terminal；正常 GO batch 完成后解除 Drop 取消 guard，不取消后续 batch。
+
+修复前 SQL2000 真实 jTDS 的 aborted_request 用例失败，原服务器任务/事务未能及时释放；延迟取消响应的协议测试同样失败。修复后增加确定性的 disconnect 先取得会话所有权、随后 abort 请求的用例。协议测试不通过额外连接 Arc 保活，验证取消完成前登记仍活动、完成后释放；实库按 SPID + login_time 检查原服务器事务释放、未提交数据消失，且失效会话不会再次执行 SQL。
+
+本次最终验证结果：
+
+- Rust 核心手动事务相关回归 35 passed；Agent 339 passed、1 个原有外部制品测试 ignored；发送总期限集成测试 1 passed；SQL Server 驱动 145 passed、4 个原有实库测试 ignored。
+- Java common 232 passed、sqlserver-legacy 37 passed，两个组件及故障测试 JAR 构建通过。
+- 前端相关 5 文件 111 passed；vue-tsc 使用与上游 CI 相同的 8 GiB Node 堆配置通过；oxfmt、oxlint（无 error）、连接类型生成校验和 i18n dry-run 全部通过；Vite 生产构建通过。
+- cargo fmt --check、git diff --check 通过。cargo check -p dbx --no-default-features --features sqlite-bundled 通过，包含桌面命令接口；不将单包检查标为整个工作区 make cargo-check-fast 通过。
+- SQL2000 8.00.2039 的原生、jTDS 各 13 项即时实库用例通过；2019 15.0.4490.9 与 2022 16.0.4295.3 的原生、Microsoft JDBC 13.2、jTDS 各 13 项即时实库用例通过。上述每组排除且仅排除真实 5 分钟墙钟空闲测试；此前 2026-10-04 的真实墙钟结果保留，本次没有把这些历史结果标为重新执行。
+- 最新实库测试集共 14 项（增加 disconnect + abort 交叉用例）。日志为 target/sqlserver-7542-pr-{2000,2019,2022}-{native,jtds,microsoft}-green.log 的适用组合；重复增量结果不累加为独立用例总数。
+- 复核没有未解决的 P1/P2。三个测试实例均确认无遗留事务或测试对象；现代测试容器恢复停止状态。
+
+本次未在最新上游合并后全量重跑 make check / pnpm check，不能标为全量检查通过；2026-10-04 的 Windows 签名测试基线结果见上文。当前安装包仍是此前构建的产物；本次桌面编译检查与前端构建不等同于重新产出安装包。上游 PR CI 结果需另行核对。
+
+工具栏截图由真实 EditorToolbar 组件与隔离状态 fixture 渲染，展示活动、执行中、结果未知三个状态，不把组件截图当作实库证明：
+
+![SQL Server 手动事务工具栏状态](images/sqlserver-manual-transactions-toolbar.png)

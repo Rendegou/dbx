@@ -4013,11 +4013,19 @@ fn uses_legacy_transaction_status(version: tiberius::FeatureLevel, server_major:
 /// Consume the full response, including transaction descriptor ENVCHANGE tokens.
 pub async fn manual_transaction_status(client: &mut SqlServerClient) -> Result<ManualTransactionStatus, String> {
     if client.server_major_version.is_none() {
-        let version = execute_simple_batch_with_max_rows_metadata(client,
-            "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128))", Some(1)).await?;
-        client.server_major_version = version.iter().find_map(|result| result.result.rows.first())
-            .and_then(|row| row.first()).and_then(serde_json::Value::as_str)
-            .and_then(|version| version.split('.').next()).and_then(|major| major.parse().ok());
+        let version = execute_simple_batch_with_max_rows_metadata(
+            client,
+            "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128))",
+            Some(1),
+        )
+        .await?;
+        client.server_major_version = version
+            .iter()
+            .find_map(|result| result.result.rows.first())
+            .and_then(|row| row.first())
+            .and_then(serde_json::Value::as_str)
+            .and_then(|version| version.split('.').next())
+            .and_then(|major| major.parse().ok());
         if client.server_major_version.is_none() {
             return Err("SQL Server did not return its product version for transaction capability detection".to_owned());
         }
@@ -4025,8 +4033,11 @@ pub async fn manual_transaction_status(client: &mut SqlServerClient) -> Result<M
     let legacy = uses_legacy_transaction_status(client.tds_version(), client.server_major_version);
     let results = execute_simple_batch_with_max_rows_metadata(
         client,
-        if legacy { "SELECT @@TRANCOUNT AS dbx_transaction_count" }
-        else { "SELECT @@TRANCOUNT AS dbx_transaction_count, XACT_STATE() AS dbx_transaction_state" },
+        if legacy {
+            "SELECT @@TRANCOUNT AS dbx_transaction_count"
+        } else {
+            "SELECT @@TRANCOUNT AS dbx_transaction_count, XACT_STATE() AS dbx_transaction_state"
+        },
         Some(1),
     )
     .await
@@ -4034,10 +4045,12 @@ pub async fn manual_transaction_status(client: &mut SqlServerClient) -> Result<M
     results
         .iter()
         .find_map(|result| result.result.rows.first())
-        .and_then(|row| Some(ManualTransactionStatus {
-            count: row.first()?.as_i64()?,
-            xact_state: if legacy { None } else { Some(row.get(1)?.as_i64()?) },
-        }))
+        .and_then(|row| {
+            Some(ManualTransactionStatus {
+                count: row.first()?.as_i64()?,
+                xact_state: if legacy { None } else { Some(row.get(1)?.as_i64()?) },
+            })
+        })
         .ok_or_else(|| "SQL Server did not return transaction status".to_owned())
 }
 
@@ -4160,19 +4173,25 @@ fn first_sql_tokens(sql: &str, limit: usize) -> Vec<String> {
 mod tests {
     #[test]
     fn manual_transaction_status_keeps_legacy_and_modern_safety_explicit() {
-        use super::{ManualTransactionStatus as Status, uses_legacy_transaction_status as legacy};
+        use super::{uses_legacy_transaction_status as legacy, ManualTransactionStatus as Status};
         use tiberius::FeatureLevel::*;
         assert!(legacy(SqlServer2000, Some(8)));
         assert!(legacy(SqlServer2000Sp1, Some(8)));
-        for major in [None, Some(9), Some(16)] { assert!(!legacy(SqlServer2000Sp1, major)); }
-        for version in [SqlServerV7, SqlServer2005, SqlServer2008, SqlServerN] { assert!(!legacy(version, Some(8))); }
+        for major in [None, Some(9), Some(16)] {
+            assert!(!legacy(SqlServer2000Sp1, major));
+        }
+        for version in [SqlServerV7, SqlServer2005, SqlServer2008, SqlServerN] {
+            assert!(!legacy(version, Some(8)));
+        }
         assert!(Status { count: 1, xact_state: None }.is_active());
         assert!(Status { count: 1, xact_state: Some(1) }.is_active());
         for count in [0, 2, -1] {
             assert!(!Status { count, xact_state: None }.is_active());
             assert!(!Status { count, xact_state: Some(1) }.is_active());
         }
-        for state in [-1, 0, 2] { assert!(!Status { count: 1, xact_state: Some(state) }.is_active()); }
+        for state in [-1, 0, 2] {
+            assert!(!Status { count: 1, xact_state: Some(state) }.is_active());
+        }
     }
 
     #[test]

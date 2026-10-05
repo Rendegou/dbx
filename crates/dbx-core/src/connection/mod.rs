@@ -33,8 +33,8 @@ use crate::db::proxy_tunnel::ProxyTunnelManager;
 use crate::db::ssh_tunnel::TunnelManager;
 use crate::models::connection::{
     database_info_from_protocol_value, parse_jdbc_host_port, parse_mongo_first_host, rewrite_jdbc_url_host,
-    ConnectionConfig, ConnectionLivenessFailureKind, ConnectionLivenessMessage, ConnectionTestResult,
-    DatabaseConnectionInfo, DatabaseType, TransportLayerConfig,
+    validate_jdbc_transport_url, ConnectionConfig, ConnectionLivenessFailureKind, ConnectionLivenessMessage,
+    ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig,
 };
 use crate::mongo_oidc::MongoOidcBrowserOpener;
 use crate::nacos::config::{NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD};
@@ -119,6 +119,7 @@ pub enum PoolKind {
     Elasticsearch(db::elasticsearch_driver::EsClient),
     Easysearch(db::easysearch_driver::EasysearchClient),
     Solr(db::solr_driver::SolrClient),
+    CouchDb(db::couchdb_driver::CouchDbClient),
     Meilisearch(db::meilisearch_driver::MeilisearchClient),
     Salesforce(db::salesforce_driver::SfClient),
     HBase(db::hbase_driver::HBaseClient),
@@ -1881,7 +1882,9 @@ impl AppState {
                     Some(external_driver_connect_timeout(config)),
                 )
                 .await;
-            session.shutdown().await;
+            if let Err(error) = session.shutdown().await {
+                log::warn!("Failed to stop the plugin runtime after testing connection '{}': {error}", config.name);
+            }
             return result.map(|response| {
                 ConnectionTestResult::success("Connection successful")
                     .with_database_info(database_info_from_protocol_value(&response))
@@ -1926,7 +1929,12 @@ impl AppState {
                 session,
             }),
             Err(error) => {
-                session.shutdown().await;
+                if let Err(shutdown_error) = session.shutdown().await {
+                    log::warn!(
+                        "Failed to stop the plugin runtime after failing to connect '{}': {shutdown_error}",
+                        config.name
+                    );
+                }
                 Err(error)
             }
         }
@@ -2439,7 +2447,7 @@ impl AppState {
 
         let shutdown = async {
             let routing = self.pool_routing_control();
-            tokio::join!(
+            let (_, _, _, _, _, _, plugin_shutdown) = tokio::join!(
                 self.task_supervisor.shutdown(deadline),
                 routing.close_removed(removed_pools),
                 self.tunnels.stop_all_tunnels(),
@@ -2448,6 +2456,9 @@ impl AppState {
                 self.agent_manager.stop_daemons(),
                 self.plugin_host.stop_all(),
             );
+            if let Err(error) = plugin_shutdown {
+                log::warn!("Failed to stop plugin runtimes during shutdown: {error}");
+            }
         };
         if tokio::time::timeout(deadline, shutdown).await.is_err() {
             log::warn!("Timed out shutting down DBX runtime resources after {}ms", deadline.as_millis());
@@ -2712,7 +2723,7 @@ impl AppState {
         if let Some(database) = self.resolve_legacy_postgres_like_database(connection_id, &db_config).await {
             db_config.database = Some(database);
         }
-        if db_config.db_type != DatabaseType::Plugin {
+        if db_config.db_type != DatabaseType::Plugin && runtime_proxy.is_none() {
             probe_connection_endpoint(&db_config, &host, port).await?;
         }
         if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
@@ -2959,12 +2970,13 @@ impl AppState {
             DatabaseType::ClickHouse => {
                 let username = if db_config.username.is_empty() { None } else { Some(db_config.username.clone()) };
                 let password = if db_config.password.is_empty() { None } else { Some(db_config.password.clone()) };
-                let client = db::clickhouse_driver::ChClient::new_with_ca_cert(
+                let client = db::clickhouse_driver::ChClient::new_with_ca_cert_and_proxy(
                     &url,
                     username,
                     password,
                     Some(&db_config.ca_cert_path),
                     db_config.url_params.as_deref(),
+                    clickhouse_http_proxy(runtime_proxy.as_ref())?,
                     connect_timeout,
                 )?;
                 db::clickhouse_driver::test_connection(&client, connect_timeout).await?;
@@ -3018,6 +3030,22 @@ impl AppState {
                 )?;
                 db::solr_driver::test_connection(&mut client, connect_timeout).await?;
                 PoolKind::Solr(client)
+            }
+            DatabaseType::CouchDb => {
+                let client = db::couchdb_driver::CouchDbClient::from_config(
+                    &url,
+                    Some(&db_config.username),
+                    Some(&db_config.password),
+                    db_config.ssl,
+                    db_config.url_params.as_deref(),
+                    db_config.external_config.as_ref(),
+                    connect_timeout,
+                    Some(db_config.ca_cert_path.as_str()),
+                    Some(db_config.client_cert_path.as_str()),
+                    Some(db_config.client_key_path.as_str()),
+                )?;
+                db::couchdb_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::CouchDb(client)
             }
             DatabaseType::Meilisearch => {
                 let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
@@ -3499,6 +3527,7 @@ impl AppState {
                             1,
                             false,
                             leaf.allow_exec_channel_proxy,
+                            &leaf.proxy_command,
                         )
                         .await
                         .map(|_| ())
@@ -3588,6 +3617,11 @@ impl AppState {
         if transport_layers.is_empty() || db::sqlite_worker::sqlite_remote_worker_requested(config) {
             return Ok(ConnectionEndpoint::direct(config.host.clone(), config.port));
         }
+        if config.db_type == DatabaseType::ClickHouse {
+            if let Some(proxy) = self.clickhouse_proxy_for_transport_layers(connection_id, &transport_layers).await? {
+                return Ok(ConnectionEndpoint { host: config.host.clone(), port: config.port, proxy: Some(proxy) });
+            }
+        }
         if config.uses_oracle_tns() {
             // A TNS descriptor may contain several failover addresses, so rewriting it
             // through one local tunnel endpoint would silently break Oracle Net routing.
@@ -3617,6 +3651,12 @@ impl AppState {
             }
         }
 
+        if config.db_type == DatabaseType::Jdbc {
+            if let Some(url) = config.connection_string.as_deref().filter(|url| !url.is_empty()) {
+                validate_jdbc_transport_url(url)?;
+            }
+        }
+
         let (remote_host, remote_port) = connection_remote_endpoint(config);
         // Plugin providers commonly declare no host/port binding (Kafka keeps
         // its endpoints in provider fields instead), so a static tunnel would
@@ -3640,6 +3680,43 @@ impl AppState {
         .await?;
 
         Ok(ConnectionEndpoint { host: "127.0.0.1".to_string(), port: local_port, proxy: None })
+    }
+
+    async fn clickhouse_proxy_for_transport_layers(
+        &self,
+        connection_id: &str,
+        transport_layers: &[TransportLayerConfig],
+    ) -> Result<Option<PluginRuntimeProxy>, String> {
+        use crate::models::connection::ProxyType;
+
+        let Some(TransportLayerConfig::Proxy(proxy)) = transport_layers.last() else {
+            return self.socks5_route_for_transport_layers(connection_id, transport_layers).await;
+        };
+        if proxy.proxy_type == ProxyType::Socks5 {
+            return self.socks5_route_for_transport_layers(connection_id, transport_layers).await;
+        }
+        let (host, port) = if transport_layers.len() == 1 {
+            (proxy.host.clone(), proxy.port)
+        } else {
+            let local_port = db::transport_layer_tunnel::start_transport_layers(
+                connection_id,
+                &transport_layers[..transport_layers.len() - 1],
+                &proxy.host,
+                proxy.port,
+                &self.tunnels,
+                &self.proxy_tunnels,
+                &self.http_tunnels,
+            )
+            .await?;
+            ("127.0.0.1".to_string(), local_port)
+        };
+        Ok(Some(PluginRuntimeProxy {
+            proxy_type: "http".to_string(),
+            host,
+            port,
+            username: proxy.username.clone(),
+            password: proxy.password.clone(),
+        }))
     }
 
     /// Builds the host-managed SOCKS5 route from the transport chain for
@@ -4401,6 +4478,17 @@ impl AppState {
                         Ok(()) => false,
                         Err(err) => {
                             log::warn!("Solr connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
+                PoolKind::CouchDb(client) => {
+                    let client = client.clone();
+                    let timeout = crate::db::connection_timeout();
+                    match db::couchdb_driver::test_connection(&client, timeout).await {
+                        Ok(()) => false,
+                        Err(err) => {
+                            log::warn!("CouchDB connection pool '{pool_key}' is stale: {err}");
                             true
                         }
                     }
@@ -5642,6 +5730,16 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::CouchDb(client) => {
+                    let client = client.clone();
+                    match db::couchdb_driver::test_connection(&client, timeout).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::warn!("CouchDB connection pool '{key}' is unhealthy: {e}");
+                            false
+                        }
+                    }
+                }
                 PoolKind::Meilisearch(client) => {
                     let client = client.clone();
                     match db::meilisearch_driver::test_connection(&client, timeout).await {
@@ -6059,6 +6157,7 @@ enum KeepaliveTarget {
     Easysearch(db::easysearch_driver::EasysearchClient),
     Salesforce(db::salesforce_driver::SfClient),
     Solr(db::solr_driver::SolrClient),
+    CouchDb(db::couchdb_driver::CouchDbClient),
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
@@ -6218,6 +6317,7 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
         PoolKind::Easysearch(client) => Some(KeepaliveTarget::Easysearch(client.clone())),
         PoolKind::Salesforce(client) => Some(KeepaliveTarget::Salesforce(client.clone())),
         PoolKind::Solr(client) => Some(KeepaliveTarget::Solr(client.clone())),
+        PoolKind::CouchDb(client) => Some(KeepaliveTarget::CouchDb(client.clone())),
         PoolKind::HBase(client) => Some(KeepaliveTarget::HBase(client.clone())),
         PoolKind::VectorDb(client) => Some(KeepaliveTarget::VectorDb(client.clone())),
         PoolKind::InfluxDb(client) => Some(KeepaliveTarget::InfluxDb(client.clone())),
@@ -6270,6 +6370,9 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
             db::salesforce_driver::SfClient::test_connection(client, timeout).await.map_err(Into::into)
         }
         KeepaliveTarget::Solr(client) => db::solr_driver::test_connection(client, timeout).await.map_err(Into::into),
+        KeepaliveTarget::CouchDb(client) => {
+            db::couchdb_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
         KeepaliveTarget::HBase(client) => {
             db::hbase_driver::test_connection(client, timeout).await.map(|_| ()).map_err(Into::into)
         }
@@ -6722,6 +6825,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::Elasticsearch(client) => PoolKind::Elasticsearch(client.clone()),
         PoolKind::Easysearch(client) => PoolKind::Easysearch(client.clone()),
         PoolKind::Solr(client) => PoolKind::Solr(client.clone()),
+        PoolKind::CouchDb(client) => PoolKind::CouchDb(client.clone()),
         PoolKind::Meilisearch(client) => PoolKind::Meilisearch(client.clone()),
         PoolKind::Salesforce(client) => PoolKind::Salesforce(client.clone()),
         PoolKind::HBase(client) => PoolKind::HBase(client.clone()),
@@ -6785,6 +6889,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         PoolKind::Solr(client) => {
             drop(client);
         }
+        PoolKind::CouchDb(client) => {
+            drop(client);
+        }
         PoolKind::Meilisearch(client) => {
             drop(client);
         }
@@ -6811,7 +6918,7 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
             client.disconnect().await?;
         }
         PoolKind::ExternalDriver { session, .. } => {
-            session.shutdown().await;
+            session.shutdown().await?;
         }
         PoolKind::PluginConnection(handle) => {
             if let Err(error) = handle.disconnect().await {
@@ -6916,6 +7023,7 @@ fn base_pool_key_for_with_catalog(
                     DatabaseType::Elasticsearch
                         | DatabaseType::Easysearch
                         | DatabaseType::Solr
+                        | DatabaseType::CouchDb
                         | DatabaseType::Qdrant
                         | DatabaseType::Milvus
                         | DatabaseType::Weaviate
@@ -6990,6 +7098,28 @@ pub fn connection_url_for_endpoint(config: &ConnectionConfig, host: &str, port: 
     } else {
         config.connection_url_with_host(host, port)
     }
+}
+
+pub fn clickhouse_http_proxy(proxy: Option<&PluginRuntimeProxy>) -> Result<Option<reqwest::Proxy>, String> {
+    let Some(proxy) = proxy else {
+        return Ok(None);
+    };
+    let scheme = match proxy.proxy_type.as_str() {
+        "socks5" => "socks5h",
+        "http" => "http",
+        _ => return Err("Unsupported ClickHouse proxy type".to_string()),
+    };
+    let host = if proxy.host.contains(':') && !proxy.host.starts_with('[') {
+        format!("[{}]", proxy.host)
+    } else {
+        proxy.host.clone()
+    };
+    let mut http_proxy = reqwest::Proxy::all(format!("{scheme}://{host}:{}", proxy.port))
+        .map_err(|error| format!("Invalid ClickHouse proxy address: {error}"))?;
+    if !proxy.username.is_empty() || !proxy.password.is_empty() {
+        http_proxy = http_proxy.basic_auth(&proxy.username, &proxy.password);
+    }
+    Ok(Some(http_proxy))
 }
 
 pub fn redacted_connection_url_for_endpoint(config: &ConnectionConfig, host: &str, port: u16) -> String {
@@ -7183,9 +7313,9 @@ async fn detect_ob_oracle_mode(config: &ConnectionConfig, pool: &db::mysql::MySq
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_connect_timeout, connection_configs_pool_equivalent, connection_configs_session_credentials_compatible,
-        connection_probe_endpoints, connection_remote_endpoint, connection_url_for_endpoint,
-        database_connection_config, database_connection_config_with_catalog,
+        agent_connect_timeout, clickhouse_http_proxy, connection_configs_pool_equivalent,
+        connection_configs_session_credentials_compatible, connection_probe_endpoints, connection_remote_endpoint,
+        connection_url_for_endpoint, database_connection_config, database_connection_config_with_catalog,
         gaussdb_identifier_quote_from_query_result, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
         kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead, metadata_connection_config,
         metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
@@ -7208,6 +7338,7 @@ mod tests {
         ConnectionLivenessFailureKind, ConnectionLivenessMessage, DatabaseType, HttpTunnelConfig, ProxyTunnelConfig,
         ProxyType, SshTunnelConfig, TransportLayerConfig,
     };
+    use crate::plugins::PluginRuntimeProxy;
     use crate::query;
     use crate::schema;
     use std::sync::Arc;
@@ -8478,6 +8609,7 @@ mod tests {
             ssh_agent_sock_path: String::new(),
             auth_method: "password".to_string(),
             allow_exec_channel_proxy: false,
+            proxy_command: String::new(),
             profile_id: String::new(),
         });
         assert!(state.test_tunnel_profile(&ssh).await.is_err());
@@ -11158,6 +11290,7 @@ for line in sys.stdin:
             ssh_agent_sock_path: String::new(),
             auth_method: String::new(),
             allow_exec_channel_proxy: false,
+            proxy_command: String::new(),
             profile_id: profile_id.to_string(),
         }
     }
@@ -11300,6 +11433,165 @@ for line in sys.stdin:
             assert!(error.contains("different type"));
         }
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn clickhouse_proxy_endpoint_preserves_https_authority() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::ClickHouse;
+        config.host = "clickhouse.proxy.test".to_string();
+        config.port = 8443;
+        config.ssl = true;
+
+        for (proxy_type, expected_type) in [(ProxyType::Socks5, "socks5"), (ProxyType::Http, "http")] {
+            config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+                id: "proxy".to_string(),
+                name: String::new(),
+                enabled: true,
+                proxy_type,
+                host: "127.0.0.1".to_string(),
+                port: 65000,
+                username: "proxy:user".to_string(),
+                password: "p@ss/word#".to_string(),
+                test_target: None,
+                profile_id: String::new(),
+            })];
+
+            let endpoint = state.connection_endpoint("proxied-clickhouse", &config).await.unwrap();
+            assert_eq!(endpoint.host, config.host);
+            assert_eq!(endpoint.port, config.port);
+            assert_eq!(
+                connection_url_for_endpoint(&config, &endpoint.host, endpoint.port),
+                "https://clickhouse.proxy.test:8443"
+            );
+            let proxy = endpoint.proxy.unwrap();
+            assert_eq!(proxy.proxy_type, expected_type);
+            assert_eq!(proxy.host, "127.0.0.1");
+            assert_eq!(proxy.port, 65000);
+            assert_eq!(proxy.username, "proxy:user");
+            assert_eq!(proxy.password, "p@ss/word#");
+            assert!(clickhouse_http_proxy(Some(&proxy)).unwrap().is_some());
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clickhouse_http_proxy_accepts_ipv6_and_rejects_unknown_protocols() {
+        for host in ["::1", "[::1]"] {
+            let proxy = PluginRuntimeProxy::socks5(host.to_string(), 1080, String::new(), String::new());
+            assert!(clickhouse_http_proxy(Some(&proxy)).unwrap().is_some());
+        }
+        assert!(clickhouse_http_proxy(None).unwrap().is_none());
+        let proxy = PluginRuntimeProxy {
+            proxy_type: "unsupported".to_string(),
+            host: "localhost".to_string(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+        };
+        assert!(clickhouse_http_proxy(Some(&proxy)).is_err());
+    }
+
+    #[tokio::test]
+    async fn clickhouse_proxy_chain_preserves_final_proxy_and_database_authority() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::ClickHouse;
+        config.host = "clickhouse.proxy.test".to_string();
+        config.port = 8443;
+        config.ssl = true;
+        for (proxy_type, expected_type) in [(ProxyType::Socks5, "socks5"), (ProxyType::Http, "http")] {
+            let mut first = proxy_layer("first", "");
+            first.host = "127.0.0.1".to_string();
+            first.port = 65001;
+            let mut last = proxy_layer("last", "");
+            last.proxy_type = proxy_type;
+            last.host = "last.proxy.test".to_string();
+            last.port = 65000;
+            last.username = "final-user".to_string();
+            last.password = "final-password".to_string();
+            config.transport_layers = vec![TransportLayerConfig::Proxy(first), TransportLayerConfig::Proxy(last)];
+            let endpoint = state.connection_endpoint("clickhouse-chain", &config).await.unwrap();
+            assert_eq!(endpoint.host, config.host);
+            assert_eq!(endpoint.port, config.port);
+            let proxy = endpoint.proxy.unwrap();
+            assert_eq!(proxy.proxy_type, expected_type);
+            assert_eq!(proxy.host, "127.0.0.1");
+            assert_ne!(proxy.port, 0);
+            assert_ne!(proxy.port, 65000);
+            assert_eq!(proxy.username, "final-user");
+            assert_eq!(proxy.password, "final-password");
+            state.proxy_tunnels.stop_tunnel("clickhouse-chain:transport:0").await;
+        }
+        state.shutdown(Duration::from_secs(5)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn clickhouse_proxy_pool_does_not_require_direct_dns_or_tcp_access() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (state, dir) = test_app_state().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut greeting = [0_u8; 2];
+            socket.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting[0], 5);
+            let mut methods = vec![0_u8; greeting[1] as usize];
+            socket.read_exact(&mut methods).await.unwrap();
+            assert!(methods.contains(&0));
+            socket.write_all(&[5, 0]).await.unwrap();
+            let mut connect = [0_u8; 5];
+            socket.read_exact(&mut connect).await.unwrap();
+            assert_eq!(&connect[..4], &[5, 1, 0, 3]);
+            let mut hostname = vec![0_u8; connect[4] as usize];
+            socket.read_exact(&mut hostname).await.unwrap();
+            assert_eq!(hostname.as_slice(), b"clickhouse.proxy.invalid");
+            let mut port = [0_u8; 2];
+            socket.read_exact(&mut port).await.unwrap();
+            assert_eq!(u16::from_be_bytes(port), 8123);
+            socket.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0_u8; 1];
+                socket.read_exact(&mut byte).await.unwrap();
+                request.extend_from_slice(&byte);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /?query=SELECT%201 "));
+            assert!(request.lines().any(|line| line.eq_ignore_ascii_case("host: clickhouse.proxy.invalid:8123")));
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n1\n").await.unwrap();
+        });
+        let mut config = mysql_config(None);
+        config.id = "clickhouse-proxy-pool".to_string();
+        config.db_type = DatabaseType::ClickHouse;
+        config.host = "clickhouse.proxy.invalid".to_string();
+        config.port = 8123;
+        config.ssl = false;
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_string(),
+            port: proxy_port,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+            profile_id: String::new(),
+        })];
+        state.configs.write().await.insert(config.id.clone(), config);
+        let result =
+            tokio::time::timeout(Duration::from_secs(10), state.get_or_create_pool("clickhouse-proxy-pool", None))
+                .await
+                .unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        tokio::time::timeout(Duration::from_secs(10), server).await.unwrap().unwrap();
+        state.shutdown(Duration::from_secs(5)).await;
         let _ = std::fs::remove_dir_all(dir);
     }
 

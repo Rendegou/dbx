@@ -193,7 +193,11 @@ async fn live_manual_transaction_timeout_invalidates_session_without_replay() {
     let database = config.database.as_deref().unwrap();
     let session = begin_manual_transaction(&state, &config.id, database, None, None).await.unwrap();
     assert_driver(&state, &session).await;
-    let spid = execute_in_manual_transaction(&state, &session, "SELECT @@SPID", database, None, Some(1)).await.unwrap()[0].rows[0][0].as_i64().unwrap();
+    let spid = execute_in_manual_transaction(&state, &session, "SELECT @@SPID", database, None, Some(1)).await.unwrap()
+        [0]
+    .rows[0][0]
+        .as_i64()
+        .unwrap();
     let identity = sqlserver::log_old_session(&mut observer, spid, "before timeout").await;
     let error = execute_in_manual_transaction_with_options(
         &state,
@@ -701,7 +705,11 @@ async fn live_manual_transaction_fault_network_break_during_execution_discards_s
             .await
             .unwrap();
     assert_eq!(visible.rows[0][0], serde_json::json!(0));
-    assert_eq!(proxy.stats.connections.load(Ordering::SeqCst), established_connections, "network failure triggered reconnect");
+    assert_eq!(
+        proxy.stats.connections.load(Ordering::SeqCst),
+        established_connections,
+        "network failure triggered reconnect"
+    );
     assert!(state.running_queries.diagnostics().active_execution_ids.is_empty());
     sqlserver::execute_simple_batch_with_max_rows(&mut observer, &format!("DROP TABLE {table}"), None).await.unwrap();
     state.agent_manager.stop_daemons().await;
@@ -774,43 +782,112 @@ async fn live_manual_transaction_wall_clock_idle_watchdog_rolls_back_without_req
     );
 }
 
-#[tokio::test]
-#[ignore = "requires writable SQL Server; dropping a running request must stop its dedicated session"]
-async fn live_manual_transaction_aborted_request_releases_original_server_transaction() {
+async fn aborted_request_probe(disconnecting: bool) {
     let (state, config, mut observer, _dir) = setup().await;
     let state = std::sync::Arc::new(state);
     let database = config.database.as_deref().unwrap();
     let table = format!("dbo.dbx_manual_aborted_{}", uuid::Uuid::new_v4().simple());
-    sqlserver::execute_simple_batch_with_max_rows(&mut observer,
-        &format!("CREATE TABLE {table} (id int PRIMARY KEY)"), None).await.unwrap();
+    sqlserver::execute_simple_batch_with_max_rows(
+        &mut observer,
+        &format!("CREATE TABLE {table} (id int PRIMARY KEY)"),
+        None,
+    )
+    .await
+    .unwrap();
     let session = begin_manual_transaction(&state, &config.id, database, None, None).await.unwrap();
     assert_driver(&state, &session).await;
-    let spid = execute_in_manual_transaction(&state, &session, "SELECT @@SPID", database, None, Some(1))
-        .await.unwrap()[0].rows[0][0].as_i64().unwrap();
-    execute_in_manual_transaction(&state, &session, &format!("INSERT INTO {table} VALUES (1)"), database, None, Some(1)).await.unwrap();
+    let spid = execute_in_manual_transaction(&state, &session, "SELECT @@SPID", database, None, Some(1)).await.unwrap()
+        [0]
+    .rows[0][0]
+        .as_i64()
+        .unwrap();
+    execute_in_manual_transaction(
+        &state,
+        &session,
+        &format!("INSERT INTO {table} VALUES (1)"),
+        database,
+        None,
+        Some(1),
+    )
+    .await
+    .unwrap();
     let identity = sqlserver::log_old_session(&mut observer, spid, "before request abort").await;
     let execution = {
-        let state = state.clone(); let session = session.clone(); let database = database.to_owned();
+        let state = state.clone();
+        let session = session.clone();
+        let database = database.to_owned();
         tokio::spawn(async move {
-            execute_in_manual_transaction_with_options(&state, &session, "WAITFOR DELAY '00:00:10'; SELECT 1", &database, None,
-                ManualTransactionExecutionOptions { timeout_secs: Some(20), execution_id: Some("live-request-abort".to_owned()), ..Default::default() }).await
+            execute_in_manual_transaction_with_options(
+                &state,
+                &session,
+                "WAITFOR DELAY '00:00:10'; SELECT 1",
+                &database,
+                None,
+                ManualTransactionExecutionOptions {
+                    timeout_secs: Some(20),
+                    execution_id: Some("live-request-abort".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
         })
     };
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            if sqlserver::execute_query(&mut observer, &sqlserver::wait_query(spid)).await.unwrap().rows[0][0] == serde_json::json!(1) { break; }
+            if sqlserver::execute_query(&mut observer, &sqlserver::wait_query(spid)).await.unwrap().rows[0][0]
+                == serde_json::json!(1)
+            {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
-    }).await.expect("request never reached server");
-    execution.abort(); assert!(execution.await.unwrap_err().is_cancelled());
+    })
+    .await
+    .expect("request never reached server");
+    // Transfer cleanup ownership before dropping the future. This avoids relying
+    // on scheduler timing or lifecycle cancellation to reproduce the race.
+    let disconnect_task = if disconnecting {
+        let removed = state.transaction_sessions.write().await.remove(&session).unwrap();
+        assert!(removed.busy);
+        let state = state.clone();
+        let session = session.clone();
+        Some(tokio::spawn(async move {
+            dbx_core::query::sqlserver_manual_transaction::disconnect(&state, &session, removed).await;
+        }))
+    } else {
+        None
+    };
+    execution.abort();
+    assert!(execution.await.unwrap_err().is_cancelled());
+    if let Some(task) = disconnect_task {
+        task.await.unwrap();
+    }
     tokio::time::timeout(Duration::from_secs(8), async {
-        while state.transaction_sessions.read().await.contains_key(&session) { tokio::time::sleep(Duration::from_millis(30)).await; }
-    }).await.expect("dropped request left a registered session");
+        while state.transaction_sessions.read().await.contains_key(&session) {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .expect("dropped request left a registered session");
     sqlserver::wait_for_session_release(&mut observer, spid, identity.as_deref()).await;
-    let visible = sqlserver::execute_query(&mut observer, &format!("SET LOCK_TIMEOUT 3000; SELECT COUNT(*) FROM {table}")).await.unwrap();
+    let visible =
+        sqlserver::execute_query(&mut observer, &format!("SET LOCK_TIMEOUT 3000; SELECT COUNT(*) FROM {table}"))
+            .await
+            .unwrap();
     assert_eq!(visible.rows[0][0], serde_json::json!(0));
     assert!(state.running_queries.diagnostics().active_execution_ids.is_empty());
     assert!(execute_in_manual_transaction(&state, &session, "SELECT 2", database, None, Some(1)).await.is_err());
     sqlserver::execute_simple_batch_with_max_rows(&mut observer, &format!("DROP TABLE {table}"), None).await.unwrap();
     state.agent_manager.stop_daemons().await;
+}
+#[tokio::test]
+#[ignore = "requires writable SQL Server; dropping a running request must stop its dedicated session"]
+async fn live_manual_transaction_aborted_request_releases_original_server_transaction() {
+    aborted_request_probe(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires writable SQL Server; disconnect must own cleanup when the request is dropped"]
+async fn live_manual_transaction_aborted_request_after_disconnect_releases_original_server_transaction() {
+    aborted_request_probe(true).await;
 }

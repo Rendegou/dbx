@@ -347,22 +347,12 @@ impl Drop for ExecutionGuard {
                         Failure::new(Kind::ConnectionLost, Outcome::Unknown, "Transaction request was interrupted"),
                     );
                 }
-                // A dropped shared-Agent call cannot poll its own cancellation
-                // branch. Interrupt this exact session before its pool is detached.
+                // The owned Agent RPC task consumes its cancellation corridor.
+                // Waiting for its client lock prevents pool close from killing it
+                // before both replies arrive; never send a competing cancel RPC.
                 {
                     let mut conn = session.connection.lock().await;
-                    send_native_attention(&mut conn).await;
-                    if let TxnConnection::Agent { client, .. } = &*conn {
-                        let _ = client
-                            .lock()
-                            .await
-                            .call_with_timeout::<serde_json::Value>(
-                                "cancel_session",
-                                serde_json::json!({}),
-                                Some(Duration::from_secs(5)),
-                            )
-                            .await;
-                    }
+                    interrupt_fixed_connection(&mut conn).await;
                 }
                 drop(session);
             }
@@ -376,6 +366,26 @@ async fn send_native_attention(conn: &mut TxnConnection) {
     if let TxnConnection::SqlServer { client: Some(client), .. } = conn {
         let attention = async { client.lock().await.send_attention().await };
         let _ = tokio::time::timeout(db::connection_timeout().min(Duration::from_secs(5)), attention).await;
+    }
+}
+
+/// Dropping the outer request cancels the owned JDBC RPC, without dropping
+/// its response reader or aborting the bounded cancellation corridor.
+struct AgentQueryCancellation(Option<tokio_util::sync::CancellationToken>);
+impl Drop for AgentQueryCancellation {
+    fn drop(&mut self) {
+        if let Some(token) = &self.0 {
+            token.cancel();
+        }
+    }
+}
+
+async fn interrupt_fixed_connection(conn: &mut TxnConnection) {
+    send_native_attention(conn).await;
+    if let TxnConnection::Agent { client, .. } = conn {
+        // The owned RPC holds this lock until query + cancel replies, or until
+        // its bounded cancellation grace kills an unresponsive dedicated Agent.
+        let _finished = client.lock().await;
     }
 }
 
@@ -458,7 +468,7 @@ pub async fn execute(
             RunningTaskMetadata::query(connection_id.clone(), database.to_owned(), None),
         );
         state.running_queries.set_pool_key(execution_id, pool_key.clone());
-        registered
+        Arc::new(registered)
     });
     let token = registered.as_ref().map(|query| query.token()).unwrap_or_default();
     let timeout = resolve_query_timeout(options.timeout_secs);
@@ -495,15 +505,28 @@ pub async fn execute(
                         agent_execute_query_params(&rewritten, Some(database).filter(|d| !d.is_empty()), None, opts);
                     params["timeoutSecs"] = serde_json::json!(timeout.map(|t| t.as_secs()).unwrap_or(0));
                     params["returnAllResults"] = serde_json::json!(true);
-                    let mut client = client.lock().await;
-                    let batch_results = client
-                        .call_with_timeout_and_cancel::<Vec<db::QueryResult>>(
-                            "execute_query",
-                            params,
-                            timeout,
-                            Some(token.clone()),
-                        )
-                        .await?;
+                    let client = client.clone();
+                    let cancellation = token.clone();
+                    let completion = registered.clone();
+                    let mut drop_cancellation = AgentQueryCancellation(Some(token.clone()));
+                    let task = tokio::spawn(async move {
+                        // Keep terminal confirmation pending while JDBC is still
+                        // executing or cancelling after the outer future is dropped.
+                        let _completion = completion;
+                        let mut client = client.lock().await;
+                        client
+                            .call_with_timeout_and_cancel::<Vec<db::QueryResult>>(
+                                "execute_query",
+                                params,
+                                timeout,
+                                Some(cancellation),
+                            )
+                            .await
+                    });
+                    let result = task.await;
+                    drop_cancellation.0 = None;
+                    let batch_results =
+                        result.map_err(|error| format!("SQL Server Agent query task failed: {error}"))??;
                     results.extend(batch_results.into_iter().map(|result| {
                         ExecuteMultiResult::success_with_optional_server_large_values(
                             result,
@@ -568,9 +591,11 @@ pub async fn execute(
                 || error.to_ascii_lowercase().contains("timed out")
                 || error.to_ascii_lowercase().contains("timeout");
             state.transaction_sessions.write().await.remove(id);
-            if token.is_cancelled() || metadata.lifecycle.cancellation().is_cancelled()
+            if token.is_cancelled()
+                || metadata.lifecycle.cancellation().is_cancelled()
                 || error.to_ascii_lowercase().contains("timed out")
-                || error.to_ascii_lowercase().contains("timeout") {
+                || error.to_ascii_lowercase().contains("timeout")
+            {
                 send_native_attention(&mut conn).await;
             }
             let encoded = cleanup_failure(
@@ -737,6 +762,11 @@ pub async fn disconnect(state: &AppState, id: &str, session: TransactionSession)
     metadata.record(id, Failure::new(Kind::ConnectionLost, Outcome::Unknown, "The connection was disconnected"));
     // Lifecycle cancellation releases an executing request's lock first.
     let mut conn = session.connection.lock().await;
+    if session.busy {
+        // The map may already belong to disconnect when ExecutionGuard runs.
+        // This owner must also interrupt a dropped native request before FIN.
+        interrupt_fixed_connection(&mut conn).await;
+    }
     let _ = cleanup_failure(
         state,
         id,
@@ -787,10 +817,14 @@ fn spawn_idle_watcher(sessions: Arc<tokio::sync::RwLock<HashMap<String, Transact
                             Outcome::RolledBack,
                             "Transaction rolled back after five minutes of inactivity",
                         ),
-                        Ok(Err(error)) => Failure::new(Kind::RollbackFailed, Outcome::Unknown,
-                            format!("Idle transaction rollback could not be confirmed: {error}")),
-                        Err(_) => Failure::new(Kind::RollbackFailed, Outcome::Unknown,
-                            "Idle transaction rollback timed out"),
+                        Ok(Err(error)) => Failure::new(
+                            Kind::RollbackFailed,
+                            Outcome::Unknown,
+                            format!("Idle transaction rollback could not be confirmed: {error}"),
+                        ),
+                        Err(_) => {
+                            Failure::new(Kind::RollbackFailed, Outcome::Unknown, "Idle transaction rollback timed out")
+                        }
                     };
                 metadata.record(&id, outcome);
                 // The dedicated guard also detaches the pool when this task ends.
@@ -844,12 +878,28 @@ log = sys.argv[1]
 rollback_fails = sys.argv[2] == 'true'
 commit_fails = sys.argv[3] == 'true'
 print(json.dumps({'ready':True}), flush=True)
+pending = None
 for line in sys.stdin:
     request = json.loads(line)
     method = request['method']
     params = request.get('params', {})
     with open(log, 'a') as output:
         output.write(json.dumps({'method':method, 'params':params}) + '\n')
+    if method == 'handshake':
+        print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':2,'agentProtocolVersion':2,'capabilities':['multi_session']}}), flush=True)
+        continue
+    if method == 'execute_query' and params.get('sql') == 'DELAYED_CANCEL':
+        pending = request['id']
+        continue
+    if method == 'cancel_session' and pending is not None:
+        assert params['agentSessionId'] == '__legacy__'
+        print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'ok':True}}), flush=True)
+        time.sleep(0.4)
+        with open(log, 'a') as output:
+            output.write(json.dumps({'method':'cancel_completed'}) + '\n')
+        print(json.dumps({'jsonrpc':'2.0','id':pending,'error':{'code':-1,'message':'Query cancelled'}}), flush=True)
+        pending = None
+        continue
     sql = params.get('sql','')
     error = None
     if method == 'execute_query':
@@ -1064,6 +1114,94 @@ for line in sys.stdin:
         assert_eq!(error_json(&error)["transactionOutcome"], "unknown");
         assert!(!state.transaction_sessions.read().await.contains_key(&id));
         assert_eq!(events(&dir).iter().filter(|e| e["method"] == "execute_query").count(), 2);
+    }
+
+    async fn dropped_agent_request_probe(disconnecting: bool) {
+        let (state, id, dir) = mock_session(false, false).await;
+        let connection = state.transaction_sessions.read().await[&id].connection.clone();
+        {
+            let conn = connection.lock().await;
+            let TxnConnection::Agent { client, .. } = &*conn else { panic!("expected Agent") };
+            let mut client = client.lock().await;
+            client.try_optional_handshake("0.6.34").await.unwrap();
+            client.enable_dedicated_transaction_query_cancellation();
+        }
+        // Only the production RPC task may keep the dedicated client alive.
+        drop(connection);
+        let query_state = state.clone();
+        let query_id = id.clone();
+        let task = tokio::spawn(async move {
+            execute(
+                &query_state,
+                &query_id,
+                "DELAYED_CANCEL",
+                "db",
+                None,
+                ManualTransactionExecutionOptions {
+                    execution_id: Some("dropped-jdbc".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !events(&dir).iter().any(|event| event["method"] == "execute_query") {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let disconnect_task = if disconnecting {
+            let session = state.transaction_sessions.write().await.remove(&id).unwrap();
+            let state = state.clone();
+            let id = id.clone();
+            Some(tokio::spawn(async move { disconnect(&state, &id, session).await }))
+        } else {
+            None
+        };
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !events(&dir).iter().any(|event| event["method"] == "cancel_session") {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            state.running_queries.diagnostics().active_execution_ids.contains(&"dropped-jdbc".to_owned()),
+            "outer abort incorrectly confirmed completion before JDBC cancellation"
+        );
+        if let Some(task) = disconnect_task {
+            task.await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !events(&dir).iter().any(|event| event["method"] == "cancel_completed") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Agent was closed before delayed JDBC cancellation completed");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !state.running_queries.diagnostics().active_execution_ids.is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(events(&dir).iter().filter(|event| event["method"] == "execute_query").count(), 1);
+        assert!(!state.transaction_sessions.read().await.contains_key(&id));
+        assert_eq!(error_json(&missing(&state, &id))["transactionOutcome"], "unknown");
+    }
+
+    #[tokio::test]
+    async fn dropped_agent_request_waits_for_delayed_cancellation() {
+        dropped_agent_request_probe(false).await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_owns_cleanup_when_agent_request_is_dropped() {
+        dropped_agent_request_probe(true).await;
     }
 
     #[tokio::test]
