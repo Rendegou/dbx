@@ -1,3 +1,4 @@
+import { sidebarMenuTr as sidebarMenu } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/tr";
 import { dataDictionaryTr as dataDictionary } from "./dataDictionaryMessages";
@@ -60,6 +61,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  sidebarMenu,
   pluginPlatform: {
     dataAccessConsent: '"{name}", "{connection}" bağlantısındaki verileri okumak istiyor. Bu bağlantı açık olduğu sürece eklenti, Eklenti Merkezi\'nden erişimi iptal edene kadar bağlantıda salt okunur sorgular çalıştırabilir. İzin verilsin mi?',
     dataAccessConsentTitle: "Veri Erişim İsteği",
@@ -1772,6 +1774,8 @@ export default withEnglishFallback({
     rows: "{count} satır",
     totalRows: "Toplam {count} satır",
     loadedRows: "{count} satır yüklendi",
+    copyPartialRowsHintWithTotal: "Yüklenen {loaded} satır kopyalandı (toplam {total} satır; sonuç kümesi tamamen yüklenmedi)",
+    copyPartialRowsHint: "Yüklenen {loaded} satır kopyalandı (sonuç kümesi tamamen yüklenmedi)",
     totalRowCount: "(toplam {count})",
     totalRowCountWithAction: "({button}toplam {count})",
     totalRowCountAtLeast: "(en az {count} toplam)",
@@ -1839,6 +1843,8 @@ export default withEnglishFallback({
     copyExtractorInsertRowByRow: "Her satır için bir ifade",
     copyExtractorPrettyJson: "JSON'u düzenli yazdır",
     copyExtractorCamelCaseJsonFields: "snake_case alanları camelCase'e dönüştür",
+    copyExtractorValuesOnlyJsonArray: "Yalnızca değerler (tek sütun)",
+    copyExtractorValuesOnlyJsonArrayHint: "Nesneler yerine yalnızca seçili sütunun değerlerinden oluşan bir JSON dizisi oluşturur. Çok sütunlu seçimlerde nesne biçimi korunur.",
     copyExtractorPreview: "Önizleme (geçerli seçim)",
     copyExtractorEmptySelection: "Çıkarıcı çıktısını önizlemek için veri seçin.",
     copyExtractorUnsupportedSelection: "Bu çıkarıcı, her satırda aynı sütunların seçilmesini gerektirir.",
@@ -1978,6 +1984,8 @@ export default withEnglishFallback({
     xlsxHeaderOriginal: "Başlık olarak sütun adlarını kullan",
     xlsxHeaderComment: "Başlık olarak sütun açıklamalarını kullan",
     xlsxHeaderNameAndComment: "Başlık olarak sütun adlarını ve açıklamalarını kullan",
+    xlsxHeaderNameAndCommentRows: "Alan adları ve açıklamaları iki başlık satırı olarak kullan",
+    xlsxHeaderNameAndCommentRowsHint: "1. satırda alan adları, 2. satırda açıklamalar yer alır ve veriler 3. satırdan başlar. Yeniden içe aktarmadan önce açıklama satırını silerek alan adlarıyla eşleştirebilirsiniz.",
     xlsxFilterPrompt: "Dışa aktarılan Excel dosyasının filtre içerip içermeyeceğini seçin:",
     xlsxIncludeAutoFilter: "Filtreleri dâhil et",
     copied: "Kopyalandı",
@@ -2059,6 +2067,7 @@ export default withEnglishFallback({
     localFilterFor: "'{column}' İçin Yerel Değerler",
     databaseValueFilter: "Veritabanı değer filtresi",
     databaseValueFilterFor: "'{column}' İçin Veritabanı Değerleri",
+    filterFromCurrentPage: "Geçerli sayfadan değerleri al",
     columnFormatter: "Sütun biçimlendirici",
     columnFormatterActive: "Biçimlendirilmiş görünüm etkin",
     columnFormatterFor: "'{column}' için biçimlendirici",
@@ -2921,7 +2930,7 @@ export default withEnglishFallback({
     astraflowSponsored: "¥50 ücretsiz kredi",
     hiapiSponsored: "200 ücretsiz Credits",
     hiapiDescription:
-      "HiAPI; görsel, video, ses ve metin modelleri için geliştirici odaklı bir API platformudur. Metin modelleri OpenAI uyumlu uç noktalar kullanır; Remote MCP ve Agent Skills aynı hesabı Claude Code, Cursor ve diğer kodlama ajanlarına bağlar.\n🎁 Yeni kullanıcılara kayıtta 200 Credits, ilk yüklemede ise %12'ye kadar ek Credits verilir.",
+      "HiAPI; görsel, video, ses ve metin modelleri için geliştirici odaklı bir API platformudur. Metin modelleri OpenAI uyumlu uç noktalar kullanır; Remote MCP ve Agent Skills aynı hesabı Claude Code, Cursor ve diğer kodlama ajanlarına bağlar.\n🎁 Yeni kullanıcılara kayıtta 200 Credits, yüklemelerde ise %10 ek Credits verilir.",
     visitPartner: "İş ortağının web sitesini ziyaret et",
     getApiKey: "API anahtarı al",
     defaultModel: "Varsayılan Model",
@@ -6163,6 +6172,7 @@ export default withEnglishFallback({
     trimValues: "Değerleri kırp",
     emptyStringAsNull: "Boş dizeyi NULL say",
     emptyStringAsNullHint: "İşaretlendiğinde boş alanlar NULL olarak içe aktarılır ve \\N düz metin olur; aksi halde boş alanlar boş dize kalır ve \\N NULL olarak içe aktarılır.",
+    emptyStringAsNullExcelHint: "İşaretlendiğinde boş dizeler NULL olarak içe aktarılır; aksi halde boş dize olarak korunur.",
     jsonShape: "JSON satırları",
     jsonShapeAuto: "Otomatik algıla",
     jsonShapeObjects: "Nesneler",
@@ -6591,6 +6601,8 @@ export default withEnglishFallback({
     recentConfigs: "Son Yapılandırmalar",
     selectRecentConfig: "Son yapılandırmayı seç",
     ignoreComments: "Açıklama farklarını yoksay",
+    ignoreForeignKeyChecks: "Yabancı anahtar denetimlerini yoksay",
+    ignoreForeignKeyChecksHint: "Tabloların herhangi bir sırayla silinip yeniden oluşturulabilmesi için betiği SET FOREIGN_KEY_CHECKS = 0 / = 1 ile sarar",
     compare: "Karşılaştır",
     comparing: "Şemalar karşılaştırılıyor...",
     noDifferences: "Fark bulunamadı",
@@ -7686,6 +7698,9 @@ export default withEnglishFallback({
     selectFirstCompletionOnOpen: "İlk tamamlamayı otomatik seç",
     selectFirstCompletionOnOpenDescription: "Etkinleştirildiğinde liste açıldığında ilk aday seçilir ve Enter ya da Tab bunu kabul eder. Kapatıldığında Enter yeni satır ekler, Tab ilk adayı kabul eder.",
     completionTriggerMode: "SQL tamamlama tetikleme modu",
+    excludedCompletionItems: "Hariç tutulan tamamlama ögeleri",
+    excludedCompletionItemsPlaceholder: "WIDTH_BUCKET\nGET_LOCK",
+    excludedCompletionItemsDescription: "Adı listedeki bir giriyle eşleşen tamamlama önerileri (satır başına bir, büyük/küçük harf duyarsız) SQL düzenleyicide gösterilmez.",
     completionTriggerModeDescription: "SQL tamamlama adaylarının nasıl gösterileceğini seçin.",
     completionTriggerModeManual: "Yalnızca elle",
     completionTriggerModeManualDescription: "Adayları yalnızca {shortcut} tamamlama kısayolu kullanıldığında göster.",
@@ -7919,6 +7934,7 @@ export default withEnglishFallback({
     shortcutCrossScopeSummaryTooltip: "{count} kapsamlar arası aynı tuş ({pairs} yinelenen çift). Her kapsam kendi bileşimini çözer, bu yüzden aynı anda yalnızca biri tetiklenir; yalnızca bilgilendirme amaçlıdır ve uygulamayı engellemez.",
     shortcutConflictBlocksApply: "Aynı kapsamda {count} çakışma var ({pairs} yinelenen çift)",
     shortcutPressShortcut: "Kısayola basın",
+    shortcutModifierDoubleTapHint: "Bir tuş birleşimine basın veya aynı değiştirici tuşa hızla iki kez basıp bırakın (Shift, Cmd, Ctrl, Alt).",
     shortcutSearchPlaceholder: "Kısayollarda ara",
     shortcutSearchNoResults: "Aramanızla eşleşen kısayol yok.",
     shortcutConflict: "Bu kısayol aynı kapsamdaki başka bir eylemle çakışıyor.",
@@ -8104,6 +8120,11 @@ export default withEnglishFallback({
     mcpAuthPreviousStep: "Geri",
     mcpAuthNextStep: "İleri",
     mcpAuthStepProgress: "{total} adımdan {current}. adım",
+    mcpPolicyExceptionsTitle: "Kaydedilen izin istisnaları",
+    mcpPolicyExceptionsDescription: "Bağlantı kapsamını değiştirmek izin istisnalarını korur. Kapsamdaki istisnalar geçerli kalır; kapsam dışındakiler bağlantı kapsama döndüğünde uygulanır. Burada yürütme izinlerini düzenleyebilir veya devralınan izinleri geri yükleyebilirsiniz.",
+    mcpPolicyExceptionInScope: "Geçerli kapsam içinde",
+    mcpPolicyExceptionOutsideScope: "Geçerli kapsam dışında (kaydedildi)",
+    mcpPolicyExceptionInherit: "Üst düzey izinleri devral",
     mcpResourceScopeTitle: "MCP'ye görünür bağlantılar",
     mcpResourceScopeDescription: "Dinamik kapsam için grupları, hassas istisnalar için tek tek bağlantıları seçin.",
     mcpResourceScopeModeCustom: "Özel kapsam",
