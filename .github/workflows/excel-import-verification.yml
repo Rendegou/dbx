@@ -3,12 +3,19 @@ name: Excel Import Live Verification
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact commit or branch to verify
+        required: true
+        default: codex/fix-excel-blank-defaults
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: excel-import-live-${{ github.event.pull_request.number }}
+  group: excel-import-live-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -60,6 +67,8 @@ jobs:
           --health-interval 10s --health-timeout 5s --health-retries 30
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
       - name: Install native build dependencies
         run: |
           sudo apt-get update
