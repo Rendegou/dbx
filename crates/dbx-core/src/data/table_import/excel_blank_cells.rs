@@ -39,6 +39,266 @@ pub(super) struct ExcelImportPolicy {
     db_type: DatabaseType,
 }
 
+impl ExcelImportPolicy {
+    pub(super) fn new(
+        source_columns: &[String],
+        mappings: &[TableImportColumnMapping],
+        target_columns: &[crate::db::ColumnInfo],
+        db_type: &DatabaseType,
+    ) -> Result<Self, String> {
+        let target_types =
+            target_columns.iter().map(|column| (column.name.clone(), column.data_type.clone())).collect::<Vec<_>>();
+        let plan = compile_import_plan(source_columns, mappings, &target_types)?;
+        for column in target_columns {
+            if !column.is_nullable
+                && column.column_default.is_none()
+                && !column_uses_generated_value(column, db_type)
+                && !plan.target_columns.iter().any(|name| name.eq_ignore_ascii_case(&column.name))
+            {
+                return Err(format!(
+                    "Excel import required target column '{}' has no mapping and no default",
+                    column.name
+                ));
+            }
+        }
+        let columns = plan
+            .target_columns
+            .iter()
+            .map(|name| {
+                target_columns.iter().find(|column| column.name.eq_ignore_ascii_case(name)).cloned().ok_or_else(|| {
+                    format!("Cannot verify Excel blank-cell policy: target column '{name}' metadata is unavailable")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { plan, columns, db_type: *db_type })
+    }
+
+    fn omitted_columns(
+        &self,
+        rows: &[Vec<serde_json::Value>],
+        metadata: &ExcelImportMetadata,
+    ) -> Result<Vec<Vec<usize>>, String> {
+        if rows.len() != metadata.blank_cells.len() || rows.len() != metadata.row_numbers.len() {
+            return Err("Excel import cell provenance is incomplete".to_string());
+        }
+        rows.iter().enumerate().map(|(row_index, row)| {
+            let row_number = metadata.row_numbers[row_index];
+            let blanks = &metadata.blank_cells[row_index];
+            let mut omitted = Vec::new();
+            for (target_index, source_index) in self.plan.mapped_source_indexes.iter().enumerate() {
+                let column = &self.columns[target_index];
+                let value = row.get(*source_index).ok_or_else(|| "Excel import row is shorter than its column mapping".to_string())?;
+                if blanks.contains(source_index) && column_is_computed(column, &self.db_type) {
+                    omitted.push(target_index);
+                    continue;
+                }
+                if column.is_nullable { continue; }
+                if blanks.contains(source_index) {
+                    let generated = column_uses_generated_value(column, &self.db_type);
+                    if column.column_default.is_some() || generated {
+                        omitted.push(target_index);
+                    } else {
+                        return Err(format!("Excel row {row_number}, column '{}': blank cell cannot be imported into a NOT NULL column without a default", column.name));
+                    }
+                } else if value.is_null() {
+                    return Err(format!("Excel row {row_number}, column '{}': explicit NULL cannot be imported into a NOT NULL column", column.name));
+                }
+            }
+            Ok(omitted)
+        }).collect()
+    }
+
+    pub(super) fn validate(
+        &self,
+        rows: &[Vec<serde_json::Value>],
+        metadata: &ExcelImportMetadata,
+    ) -> Result<(), String> {
+        self.omitted_columns(rows, metadata).map(|_| ())
+    }
+
+    pub(super) fn can_use_full_column_plan(
+        &self,
+        rows: &[Vec<serde_json::Value>],
+        metadata: &ExcelImportMetadata,
+    ) -> Result<bool, String> {
+        Ok(self.omitted_columns(rows, metadata)?.iter().all(Vec::is_empty))
+    }
+
+    fn update_columns(&self) -> Vec<String> {
+        self.plan
+            .target_columns
+            .iter()
+            .zip(&self.columns)
+            .filter(|(_, column)| !column_is_computed(column, &self.db_type))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn sql_batches(
+        &self,
+        rows: &[Vec<serde_json::Value>],
+        metadata: &ExcelImportMetadata,
+        table: &str,
+        schema: &str,
+        db_type: &DatabaseType,
+        kingbase_oracle_mode: bool,
+        conflict_policy: TableImportConflictPolicy,
+        primary_key_columns: &[String],
+        date_time_format: Option<&str>,
+        hard_sql_bytes: Option<usize>,
+    ) -> Result<Vec<ImportSqlBatch>, String> {
+        let omitted = self.omitted_columns(rows, metadata)?;
+        let mut batches = Vec::new();
+        let mut start = 0;
+        while start < rows.len() {
+            let mut end = start + 1;
+            // Group only adjacent equal column lists: changing source order can
+            // change duplicate-key and update-existing import behavior.
+            while end < rows.len() && omitted[end] == omitted[start] {
+                end += 1;
+            }
+            let included =
+                (0..self.plan.target_columns.len()).filter(|index| !omitted[start].contains(index)).collect::<Vec<_>>();
+            let plan = CompiledImportPlan {
+                mapped_source_indexes: included.iter().map(|&index| self.plan.mapped_source_indexes[index]).collect(),
+                target_columns: included.iter().map(|&index| self.plan.target_columns[index].clone()).collect(),
+                column_types: included.iter().map(|&index| self.plan.column_types[index].clone()).collect(),
+            };
+            let identity_table = (*db_type == DatabaseType::SqlServer
+                && included.iter().any(|&index| {
+                    crate::data::transfer::is_identity_column_extra(self.columns[index].extra.as_deref())
+                }))
+            .then(|| qualified_table(table, schema, db_type, None));
+            let group_hard_sql_bytes = match (&identity_table, hard_sql_bytes) {
+                (Some(table), Some(limit)) => {
+                    let overhead =
+                        crate::data::transfer::sql_text_bytes(&sqlserver_identity_insert_scope(table, ""), db_type);
+                    Some(
+                        limit
+                            .checked_sub(overhead)
+                            .filter(|limit| *limit > 0)
+                            .ok_or_else(|| "Excel IDENTITY_INSERT scope exceeds the SQL size limit".to_string())?,
+                    )
+                }
+                _ => hard_sql_bytes,
+            };
+            let batch_start = batches.len();
+            if plan.target_columns.is_empty() {
+                let sql = self.default_row_sql(table, schema, db_type, conflict_policy, primary_key_columns)?;
+                if group_hard_sql_bytes
+                    .is_some_and(|limit| crate::data::transfer::sql_text_bytes(&sql, db_type) > limit)
+                {
+                    return Err("Excel default-row INSERT exceeds the SQL size limit".to_string());
+                }
+                batches.extend((start..end).map(|_| ImportSqlBatch { sql: sql.clone(), row_count: 1 }));
+            } else if conflict_policy == TableImportConflictPolicy::UpdateExisting {
+                let value_rows =
+                    import_value_rows_sql(&rows[start..end], &plan, db_type, kingbase_oracle_mode, date_time_format);
+                let limits =
+                    SqlBatchLimits::for_database(db_type, end - start).with_hard_sql_bytes(group_hard_sql_bytes);
+                batches.extend(
+                    crate::data::transfer::generate_primary_key_upsert_sql_batches_from_value_rows_with_update_columns(
+                        &plan.target_columns,
+                        &self.update_columns(),
+                        &value_rows,
+                        table,
+                        schema,
+                        db_type,
+                        None,
+                        limits,
+                        primary_key_columns,
+                    )?
+                    .into_iter()
+                    .map(|(sql, row_count)| ImportSqlBatch { sql, row_count }),
+                );
+            } else {
+                batches.extend(build_import_insert_batches_with_plan(
+                    &rows[start..end],
+                    &plan,
+                    table,
+                    schema,
+                    db_type,
+                    kingbase_oracle_mode,
+                    conflict_policy,
+                    primary_key_columns,
+                    date_time_format,
+                    group_hard_sql_bytes,
+                )?);
+            }
+            if let Some(table) = identity_table {
+                for batch in &mut batches[batch_start..] {
+                    batch.sql = sqlserver_identity_insert_scope(&table, &batch.sql);
+                }
+            }
+            start = end;
+        }
+        Ok(batches)
+    }
+
+    fn default_row_sql(
+        &self,
+        table: &str,
+        schema: &str,
+        db_type: &DatabaseType,
+        conflict_policy: TableImportConflictPolicy,
+        primary_key_columns: &[String],
+    ) -> Result<String, String> {
+        let sqlite = matches!(db_type, DatabaseType::Sqlite | DatabaseType::CloudflareD1);
+        if (sqlite || *db_type == DatabaseType::SqlServer) && conflict_policy == TableImportConflictPolicy::Error {
+            return Ok(format!("INSERT INTO {} DEFAULT VALUES", qualified_table(table, schema, db_type, None)));
+        }
+        let (columns, values) = if sqlite {
+            // SQLite disallows UPSERT after DEFAULT VALUES. Its PRAGMA dflt_value
+            // is the live SQL expression, evaluated by SQLite. Generated integer
+            // IDs receive NULL so SQLite allocates them. Only unique conflicts
+            // are suppressed; CHECK and NOT NULL failures remain errors.
+            let writable =
+                self.columns.iter().filter(|column| !column_is_computed(column, db_type)).collect::<Vec<_>>();
+            if writable.is_empty() {
+                return Err("Excel default-only conflict handling requires a writable target column".to_string());
+            }
+            (
+                writable.iter().map(|column| column.name.clone()).collect::<Vec<_>>(),
+                writable
+                    .iter()
+                    .map(|column| column.column_default.as_deref().unwrap_or("NULL"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+        } else {
+            (self.plan.target_columns.clone(), vec!["DEFAULT"; self.plan.target_columns.len()].join(", "))
+        };
+        let value_rows = vec![format!("({values})")];
+        let limits = SqlBatchLimits::for_database(db_type, 1);
+        let batches = if conflict_policy == TableImportConflictPolicy::UpdateExisting {
+            crate::data::transfer::generate_primary_key_upsert_sql_batches_from_value_rows_with_update_columns(
+                &columns,
+                &self.update_columns(),
+                &value_rows,
+                table,
+                schema,
+                db_type,
+                None,
+                limits,
+                primary_key_columns,
+            )?
+        } else {
+            crate::data::transfer::generate_insert_typed_sql_batches_from_value_rows_with_options(
+                &columns,
+                &value_rows,
+                table,
+                schema,
+                db_type,
+                None,
+                limits,
+                conflict_policy == TableImportConflictPolicy::Skip,
+            )?
+        };
+        batches.into_iter().next().map(|(sql, _)| sql).ok_or_else(|| "Excel default-row INSERT is empty".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,265 +862,5 @@ mod tests {
             db.query_row("SELECT value FROM items WHERE id=0", [], |row| row.get::<_, String>(0)).unwrap(),
             "default"
         );
-    }
-}
-
-impl ExcelImportPolicy {
-    pub(super) fn new(
-        source_columns: &[String],
-        mappings: &[TableImportColumnMapping],
-        target_columns: &[crate::db::ColumnInfo],
-        db_type: &DatabaseType,
-    ) -> Result<Self, String> {
-        let target_types =
-            target_columns.iter().map(|column| (column.name.clone(), column.data_type.clone())).collect::<Vec<_>>();
-        let plan = compile_import_plan(source_columns, mappings, &target_types)?;
-        for column in target_columns {
-            if !column.is_nullable
-                && column.column_default.is_none()
-                && !column_uses_generated_value(column, db_type)
-                && !plan.target_columns.iter().any(|name| name.eq_ignore_ascii_case(&column.name))
-            {
-                return Err(format!(
-                    "Excel import required target column '{}' has no mapping and no default",
-                    column.name
-                ));
-            }
-        }
-        let columns = plan
-            .target_columns
-            .iter()
-            .map(|name| {
-                target_columns.iter().find(|column| column.name.eq_ignore_ascii_case(name)).cloned().ok_or_else(|| {
-                    format!("Cannot verify Excel blank-cell policy: target column '{name}' metadata is unavailable")
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { plan, columns, db_type: *db_type })
-    }
-
-    fn omitted_columns(
-        &self,
-        rows: &[Vec<serde_json::Value>],
-        metadata: &ExcelImportMetadata,
-    ) -> Result<Vec<Vec<usize>>, String> {
-        if rows.len() != metadata.blank_cells.len() || rows.len() != metadata.row_numbers.len() {
-            return Err("Excel import cell provenance is incomplete".to_string());
-        }
-        rows.iter().enumerate().map(|(row_index, row)| {
-            let row_number = metadata.row_numbers[row_index];
-            let blanks = &metadata.blank_cells[row_index];
-            let mut omitted = Vec::new();
-            for (target_index, source_index) in self.plan.mapped_source_indexes.iter().enumerate() {
-                let column = &self.columns[target_index];
-                let value = row.get(*source_index).ok_or_else(|| "Excel import row is shorter than its column mapping".to_string())?;
-                if blanks.contains(source_index) && column_is_computed(column, &self.db_type) {
-                    omitted.push(target_index);
-                    continue;
-                }
-                if column.is_nullable { continue; }
-                if blanks.contains(source_index) {
-                    let generated = column_uses_generated_value(column, &self.db_type);
-                    if column.column_default.is_some() || generated {
-                        omitted.push(target_index);
-                    } else {
-                        return Err(format!("Excel row {row_number}, column '{}': blank cell cannot be imported into a NOT NULL column without a default", column.name));
-                    }
-                } else if value.is_null() {
-                    return Err(format!("Excel row {row_number}, column '{}': explicit NULL cannot be imported into a NOT NULL column", column.name));
-                }
-            }
-            Ok(omitted)
-        }).collect()
-    }
-
-    pub(super) fn validate(
-        &self,
-        rows: &[Vec<serde_json::Value>],
-        metadata: &ExcelImportMetadata,
-    ) -> Result<(), String> {
-        self.omitted_columns(rows, metadata).map(|_| ())
-    }
-
-    pub(super) fn can_use_full_column_plan(
-        &self,
-        rows: &[Vec<serde_json::Value>],
-        metadata: &ExcelImportMetadata,
-    ) -> Result<bool, String> {
-        Ok(self.omitted_columns(rows, metadata)?.iter().all(Vec::is_empty))
-    }
-
-    fn update_columns(&self) -> Vec<String> {
-        self.plan
-            .target_columns
-            .iter()
-            .zip(&self.columns)
-            .filter(|(_, column)| !column_is_computed(column, &self.db_type))
-            .map(|(name, _)| name.clone())
-            .collect()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn sql_batches(
-        &self,
-        rows: &[Vec<serde_json::Value>],
-        metadata: &ExcelImportMetadata,
-        table: &str,
-        schema: &str,
-        db_type: &DatabaseType,
-        kingbase_oracle_mode: bool,
-        conflict_policy: TableImportConflictPolicy,
-        primary_key_columns: &[String],
-        date_time_format: Option<&str>,
-        hard_sql_bytes: Option<usize>,
-    ) -> Result<Vec<ImportSqlBatch>, String> {
-        let omitted = self.omitted_columns(rows, metadata)?;
-        let mut batches = Vec::new();
-        let mut start = 0;
-        while start < rows.len() {
-            let mut end = start + 1;
-            // Group only adjacent equal column lists: changing source order can
-            // change duplicate-key and update-existing import behavior.
-            while end < rows.len() && omitted[end] == omitted[start] {
-                end += 1;
-            }
-            let included =
-                (0..self.plan.target_columns.len()).filter(|index| !omitted[start].contains(index)).collect::<Vec<_>>();
-            let plan = CompiledImportPlan {
-                mapped_source_indexes: included.iter().map(|&index| self.plan.mapped_source_indexes[index]).collect(),
-                target_columns: included.iter().map(|&index| self.plan.target_columns[index].clone()).collect(),
-                column_types: included.iter().map(|&index| self.plan.column_types[index].clone()).collect(),
-            };
-            let identity_table = (*db_type == DatabaseType::SqlServer
-                && included.iter().any(|&index| {
-                    crate::data::transfer::is_identity_column_extra(self.columns[index].extra.as_deref())
-                }))
-            .then(|| qualified_table(table, schema, db_type, None));
-            let group_hard_sql_bytes = match (&identity_table, hard_sql_bytes) {
-                (Some(table), Some(limit)) => {
-                    let overhead =
-                        crate::data::transfer::sql_text_bytes(&sqlserver_identity_insert_scope(table, ""), db_type);
-                    Some(
-                        limit
-                            .checked_sub(overhead)
-                            .filter(|limit| *limit > 0)
-                            .ok_or_else(|| "Excel IDENTITY_INSERT scope exceeds the SQL size limit".to_string())?,
-                    )
-                }
-                _ => hard_sql_bytes,
-            };
-            let batch_start = batches.len();
-            if plan.target_columns.is_empty() {
-                let sql = self.default_row_sql(table, schema, db_type, conflict_policy, primary_key_columns)?;
-                if group_hard_sql_bytes
-                    .is_some_and(|limit| crate::data::transfer::sql_text_bytes(&sql, db_type) > limit)
-                {
-                    return Err("Excel default-row INSERT exceeds the SQL size limit".to_string());
-                }
-                batches.extend((start..end).map(|_| ImportSqlBatch { sql: sql.clone(), row_count: 1 }));
-            } else if conflict_policy == TableImportConflictPolicy::UpdateExisting {
-                let value_rows =
-                    import_value_rows_sql(&rows[start..end], &plan, db_type, kingbase_oracle_mode, date_time_format);
-                let limits =
-                    SqlBatchLimits::for_database(db_type, end - start).with_hard_sql_bytes(group_hard_sql_bytes);
-                batches.extend(
-                    crate::data::transfer::generate_primary_key_upsert_sql_batches_from_value_rows_with_update_columns(
-                        &plan.target_columns,
-                        &self.update_columns(),
-                        &value_rows,
-                        table,
-                        schema,
-                        db_type,
-                        None,
-                        limits,
-                        primary_key_columns,
-                    )?
-                    .into_iter()
-                    .map(|(sql, row_count)| ImportSqlBatch { sql, row_count }),
-                );
-            } else {
-                batches.extend(build_import_insert_batches_with_plan(
-                    &rows[start..end],
-                    &plan,
-                    table,
-                    schema,
-                    db_type,
-                    kingbase_oracle_mode,
-                    conflict_policy,
-                    primary_key_columns,
-                    date_time_format,
-                    group_hard_sql_bytes,
-                )?);
-            }
-            if let Some(table) = identity_table {
-                for batch in &mut batches[batch_start..] {
-                    batch.sql = sqlserver_identity_insert_scope(&table, &batch.sql);
-                }
-            }
-            start = end;
-        }
-        Ok(batches)
-    }
-
-    fn default_row_sql(
-        &self,
-        table: &str,
-        schema: &str,
-        db_type: &DatabaseType,
-        conflict_policy: TableImportConflictPolicy,
-        primary_key_columns: &[String],
-    ) -> Result<String, String> {
-        let sqlite = matches!(db_type, DatabaseType::Sqlite | DatabaseType::CloudflareD1);
-        if (sqlite || *db_type == DatabaseType::SqlServer) && conflict_policy == TableImportConflictPolicy::Error {
-            return Ok(format!("INSERT INTO {} DEFAULT VALUES", qualified_table(table, schema, db_type, None)));
-        }
-        let (columns, values) = if sqlite {
-            // SQLite disallows UPSERT after DEFAULT VALUES. Its PRAGMA dflt_value
-            // is the live SQL expression, evaluated by SQLite. Generated integer
-            // IDs receive NULL so SQLite allocates them. Only unique conflicts
-            // are suppressed; CHECK and NOT NULL failures remain errors.
-            let writable =
-                self.columns.iter().filter(|column| !column_is_computed(column, db_type)).collect::<Vec<_>>();
-            if writable.is_empty() {
-                return Err("Excel default-only conflict handling requires a writable target column".to_string());
-            }
-            (
-                writable.iter().map(|column| column.name.clone()).collect::<Vec<_>>(),
-                writable
-                    .iter()
-                    .map(|column| column.column_default.as_deref().unwrap_or("NULL"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )
-        } else {
-            (self.plan.target_columns.clone(), vec!["DEFAULT"; self.plan.target_columns.len()].join(", "))
-        };
-        let value_rows = vec![format!("({values})")];
-        let limits = SqlBatchLimits::for_database(db_type, 1);
-        let batches = if conflict_policy == TableImportConflictPolicy::UpdateExisting {
-            crate::data::transfer::generate_primary_key_upsert_sql_batches_from_value_rows_with_update_columns(
-                &columns,
-                &self.update_columns(),
-                &value_rows,
-                table,
-                schema,
-                db_type,
-                None,
-                limits,
-                primary_key_columns,
-            )?
-        } else {
-            crate::data::transfer::generate_insert_typed_sql_batches_from_value_rows_with_options(
-                &columns,
-                &value_rows,
-                table,
-                schema,
-                db_type,
-                None,
-                limits,
-                conflict_policy == TableImportConflictPolicy::Skip,
-            )?
-        };
-        batches.into_iter().next().map(|(sql, _)| sql).ok_or_else(|| "Excel default-row INSERT is empty".to_string())
     }
 }
