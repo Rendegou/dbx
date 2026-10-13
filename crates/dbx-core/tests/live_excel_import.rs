@@ -8,6 +8,13 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::path::Path;
 
+fn number(value: &Value) -> i64 {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        .expect("integer result, represented as a JSON number or a precision-preserving string")
+}
+
 struct Fixture {
     state: AppState,
     config: ConnectionConfig,
@@ -85,7 +92,7 @@ impl Fixture {
             "parseOptions": { "titleRow":1, "dataStartRow":2, "emptyStringAsNull":empty_as_null },
             "mappings": columns.iter().map(|name| json!({ "sourceColumn": name, "targetColumn": name })).collect::<Vec<_>>(),
             "mode": if truncate { "truncate" } else { "append" },
-            "batchSize": 500, "createTable":false,
+            "batchSize": 1, "createTable":false,
             "conflictPolicy": if update { "updateExisting" } else { "error" }
         })).unwrap();
         import_table_file_core(
@@ -164,28 +171,27 @@ async fn live_excel_defaults_generated_columns_and_preflight() {
     let summary = fixture.import(&file, &table, &columns, false, false, false).await.unwrap();
     assert_eq!(summary.rows_imported, 2);
     let rows = fixture.sql(&format!("SELECT id,value,note,amount,derived FROM {qualified} ORDER BY id")).await.rows;
+    assert_eq!(rows.len(), 2);
+    for (row, id, value, derived) in [(&rows[0], 7, "", 0), (&rows[1], 8, "default", 7)] {
+        assert_eq!(number(&row[0]), id);
+        assert_eq!(row[1], json!(value));
+        assert!(row[2].is_null());
+        assert_eq!(number(&row[3]), 17);
+        assert_eq!(number(&row[4]), derived);
+    }
     assert_eq!(
-        rows,
-        vec![
-            vec![json!(7), json!(""), Value::Null, json!(17), json!(0)],
-            vec![json!(8), json!("default"), Value::Null, json!(17), json!(7)]
-        ]
-    );
-    assert_eq!(
-        fixture.sql(&format!("SELECT COUNT(*) FROM {qualified} WHERE created IS NOT NULL")).await.rows[0][0],
-        json!(2)
+        number(&fixture.sql(&format!("SELECT COUNT(*) FROM {qualified} WHERE created IS NOT NULL")).await.rows[0][0]),
+        2
     );
     let error = fixture.import(&file, &table, &columns, true, false, true).await.unwrap_err();
     assert!(error.contains("explicit NULL"), "{error}");
-    assert_eq!(fixture.sql(&format!("SELECT COUNT(*) FROM {qualified}")).await.rows[0][0], json!(2));
-
+    assert_eq!(number(&fixture.sql(&format!("SELECT COUNT(*) FROM {qualified}")).await.rows[0][0]), 2);
     if fixture.config.db_type != DatabaseType::SqlServer {
         fixture.sql(&format!("UPDATE {qualified} SET value='old' WHERE id=8")).await;
         fixture.import(&file, &table, &columns, false, true, false).await.unwrap();
-        assert_eq!(
-            fixture.sql(&format!("SELECT value,derived FROM {qualified} WHERE id=8")).await.rows[0],
-            vec![json!("default"), json!(7)]
-        );
+        let result = fixture.sql(&format!("SELECT value,derived FROM {qualified} WHERE id=8")).await;
+        assert_eq!(result.rows[0][0], json!("default"));
+        assert_eq!(number(&result.rows[0][1]), 7);
     }
     let required = format!("{table}_required");
     let required_qualified = fixture.qualified(&required);
@@ -193,10 +199,10 @@ async fn live_excel_defaults_generated_columns_and_preflight() {
     fixture.sql(&format!("INSERT INTO {required_qualified}(id,value) VALUES(999,'keep')")).await;
     let error = fixture.import(&file, &required, &["id", "value"], true, false, false).await.unwrap_err();
     assert!(error.contains("Excel row 3") && error.contains("without a default"), "{error}");
-    assert_eq!(
-        fixture.sql(&format!("SELECT id,value FROM {required_qualified}")).await.rows,
-        vec![vec![json!(999), json!("keep")]]
-    );
+    let preserved = fixture.sql(&format!("SELECT id,value FROM {required_qualified}")).await.rows;
+    assert_eq!(preserved.len(), 1);
+    assert_eq!(number(&preserved[0][0]), 999);
+    assert_eq!(preserved[0][1], json!("keep"));
     fixture.sql(&format!("DROP TABLE {required_qualified}")).await;
     fixture.sql(&format!("DROP TABLE {qualified}")).await;
 }
@@ -216,17 +222,27 @@ async fn live_excel_sqlserver_identity_and_failed_scope_cleanup() {
     let file = fixture._dir.path().join("identity.xlsx");
     workbook(&file, &[(7, Some("provided")), (8, None)]);
     fixture.import(&file, &table, &["id", "value"], false, false, false).await.unwrap();
-    assert_eq!(
-        fixture.sql(&format!("SELECT id,value FROM {qualified} ORDER BY id")).await.rows,
-        vec![vec![json!(7), json!("provided")], vec![json!(8), json!("default")]]
-    );
+    let rows = fixture.sql(&format!("SELECT id,value FROM {qualified} ORDER BY id")).await.rows;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(number(&rows[0][0]), 7);
+    assert_eq!(rows[0][1], json!("provided"));
+    assert_eq!(number(&rows[1][0]), 8);
+    assert_eq!(rows[1][1], json!("default"));
+    let session_before_error = fixture.sql("SELECT @@SPID").await.rows;
     workbook(&file, &[(7, None)]);
     assert!(fixture.import(&file, &table, &["id", "value"], false, false, false).await.is_err());
-    // The same native client must accept an automatic ID after a failed scoped write.
+    assert_eq!(
+        fixture.sql("SELECT @@SPID").await.rows,
+        session_before_error,
+        "failed import must clean up the same session"
+    );
     fixture.sql(&format!("INSERT INTO {qualified}(value) VALUES('after-error')")).await;
     workbook(&file, &[(41, Some("bulk")), (42, Some("bulk"))]);
     fixture.import(&file, &table, &["id", "value"], false, false, false).await.unwrap();
-    assert_eq!(fixture.sql(&format!("SELECT COUNT(*) FROM {qualified} WHERE id IN(41,42)")).await.rows[0][0], json!(2));
+    assert_eq!(
+        number(&fixture.sql(&format!("SELECT COUNT(*) FROM {qualified} WHERE id IN(41,42)")).await.rows[0][0]),
+        2
+    );
     fixture.sql(&format!("INSERT INTO {qualified}(value) VALUES('after-bulk')")).await;
     fixture.sql(&format!("DROP TABLE {qualified}")).await;
 }

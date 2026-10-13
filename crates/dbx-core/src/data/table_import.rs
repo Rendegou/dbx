@@ -4081,6 +4081,9 @@ impl XlsxStreamRowsState {
                 let mut shifted = vec![serde_json::Value::Null; shift];
                 shifted.append(&mut self.current_values);
                 self.current_values = shifted;
+                let mut shifted_content = vec![false; shift];
+                shifted_content.append(&mut self.current_cell_content);
+                self.current_cell_content = shifted_content;
                 if !self.has_expected_columns && !self.columns.is_empty() {
                     let mut shifted_columns: Vec<String> = (1..=shift).map(|index| format!("column_{index}")).collect();
                     shifted_columns.append(&mut self.columns);
@@ -14858,6 +14861,34 @@ mod tests {
             }]
         );
     }
+    #[test]
+    fn xlsx_left_shift_keeps_cell_provenance_aligned() {
+        for rows in [
+            r#"<row r="1"><c r="B1" t="inlineStr"><is><t>x</t></is></c><c r="A1"><v>7</v></c></row>"#,
+            r#"<row r="1"><c r="B1" s="0"/></row><row r="2"><c r="A2"><v>7</v></c><c r="B2" t="inlineStr"><is><t>x</t></is></c></row>"#,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("left-shift.xlsx");
+            let xml = format!(
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{rows}</sheetData></worksheet>"#
+            );
+            std::fs::write(&path, build_preview_test_xlsx(&xml, None)).unwrap();
+            let options = TableImportParseOptions { title_row: Some(0), data_start_row: Some(1), ..Default::default() };
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+            stream_xlsx_rows_to_channel(path.to_str().unwrap(), &options, 500, None, HashSet::new(), false, sender)
+                .unwrap();
+            let mut count = 0;
+            while let Some(message) = receiver.blocking_recv() {
+                if let XlsxStreamMessage::Rows(batch) = message.unwrap() {
+                    assert_eq!(batch.rows, vec![vec![serde_json::json!(7), serde_json::json!("x")]]);
+                    assert_eq!(batch.metadata.blank_cells, vec![Vec::<usize>::new()]);
+                    count += batch.rows.len();
+                }
+            }
+            assert_eq!(count, 1);
+        }
+    }
+
     #[test]
     fn xlsx_blank_provenance_is_preserved_across_preview_parse_and_streaming() {
         let dir = tempfile::tempdir().unwrap();
